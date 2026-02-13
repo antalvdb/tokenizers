@@ -3,18 +3,13 @@ use crate::models::lib::trainer::LiBTrainer;
 use crate::{Model, Token, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LiBModel {
     pub(crate) trie: TrieList,
-    #[serde(default = "default_max_len")]
     pub max_len: usize,
-    #[serde(default)]
     pub unk_token: Option<String>,
 }
-
-fn default_max_len() -> usize { 12 }
 
 impl LiBModel {
     pub fn new(max_len: usize, unk_token: Option<String>) -> Self {
