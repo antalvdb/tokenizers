@@ -1,6 +1,7 @@
 //! Popular tokenizer models.
 
 pub mod bpe;
+pub mod lib;
 pub mod unigram;
 pub mod wordlevel;
 pub mod wordpiece;
@@ -16,6 +17,8 @@ use crate::models::unigram::{Unigram, UnigramTrainer};
 use crate::models::wordlevel::{WordLevel, WordLevelTrainer};
 use crate::models::wordpiece::{WordPiece, WordPieceTrainer};
 use crate::{AddedToken, Model, Result, Token, Trainer};
+
+pub use self::lib::{LiBModel, LiBTrainer};
 
 /// Wraps a vocab mapping (ID -> token) to a struct that will be serialized in order
 /// of token ID, smallest to largest.
