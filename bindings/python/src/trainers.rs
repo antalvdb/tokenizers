@@ -6,6 +6,7 @@ use pyo3::exceptions;
 use pyo3::prelude::*;
 use pyo3::types::*;
 use serde::{Deserialize, Serialize};
+use tk::models::lib::LiBTrainer;
 use tk::models::TrainerWrapper;
 use tk::Trainer;
 use tokenizers as tk;
@@ -38,6 +39,9 @@ impl PyTrainer {
             }
             TrainerWrapper::UnigramTrainer(_) => {
                 Py::new(py, (PyUnigramTrainer {}, base))?.into_any()
+            }
+            TrainerWrapper::LiBTrainer(_) => {
+                Py::new(py, (PyLiBTrainer {}, base))?.into_any()
             }
         })
     }
@@ -885,6 +889,195 @@ impl PyUnigramTrainer {
     }
 }
 
+/// LiB Trainer
+///
+/// Trainer for the LiB (Less is Better) tokenization model.
+///
+/// Args:
+///     vocab_size (:obj:`int`):
+///         Target vocabulary size. Default: 30000.
+///     num_epochs (:obj:`int`):
+///         Number of training epochs. Default: 10000.
+///     life (:obj:`int`):
+///         Initial life counter for new vocabulary units. Default: 10.
+///     max_len (:obj:`int`):
+///         Maximum token length in characters. Default: 12.
+///     memory_in (:obj:`float`):
+///         Probability of memorizing a candidate (stochastic mode). Default: 0.25.
+///     memory_out (:obj:`float`):
+///         Fraction of low-priority units to prune per epoch. Default: 0.0001.
+///     update_rate (:obj:`float`):
+///         How far units move on reward/punishment. Default: 0.2.
+///     seed (:obj:`int`, `optional`):
+///         Random seed for reproducibility.
+///     deterministic (:obj:`bool`):
+///         Use deterministic training mode. Default: False.
+///     special_tokens (:obj:`List[Union[str, AddedToken]]`):
+///         Special tokens to add to the vocabulary.
+#[pyclass(extends=PyTrainer, module = "tokenizers.trainers", name = "LiBTrainer")]
+pub struct PyLiBTrainer {}
+
+#[pymethods]
+impl PyLiBTrainer {
+    #[getter]
+    fn get_vocab_size(self_: PyRef<Self>) -> usize {
+        getter!(self_, LiBTrainer, vocab_size)
+    }
+
+    #[setter]
+    fn set_vocab_size(self_: PyRef<Self>, vocab_size: usize) {
+        setter!(self_, LiBTrainer, vocab_size, vocab_size);
+    }
+
+    #[getter]
+    fn get_num_epochs(self_: PyRef<Self>) -> usize {
+        getter!(self_, LiBTrainer, num_epochs)
+    }
+
+    #[setter]
+    fn set_num_epochs(self_: PyRef<Self>, num_epochs: usize) {
+        setter!(self_, LiBTrainer, num_epochs, num_epochs);
+    }
+
+    #[getter]
+    fn get_life(self_: PyRef<Self>) -> i32 {
+        getter!(self_, LiBTrainer, life)
+    }
+
+    #[setter]
+    fn set_life(self_: PyRef<Self>, life: i32) {
+        setter!(self_, LiBTrainer, life, life);
+    }
+
+    #[getter]
+    fn get_max_len(self_: PyRef<Self>) -> usize {
+        getter!(self_, LiBTrainer, max_len)
+    }
+
+    #[setter]
+    fn set_max_len(self_: PyRef<Self>, max_len: usize) {
+        setter!(self_, LiBTrainer, max_len, max_len);
+    }
+
+    #[getter]
+    fn get_memory_in(self_: PyRef<Self>) -> f64 {
+        getter!(self_, LiBTrainer, memory_in)
+    }
+
+    #[setter]
+    fn set_memory_in(self_: PyRef<Self>, memory_in: f64) {
+        setter!(self_, LiBTrainer, memory_in, memory_in);
+    }
+
+    #[getter]
+    fn get_memory_out(self_: PyRef<Self>) -> f64 {
+        getter!(self_, LiBTrainer, memory_out)
+    }
+
+    #[setter]
+    fn set_memory_out(self_: PyRef<Self>, memory_out: f64) {
+        setter!(self_, LiBTrainer, memory_out, memory_out);
+    }
+
+    #[getter]
+    fn get_update_rate(self_: PyRef<Self>) -> f64 {
+        getter!(self_, LiBTrainer, update_rate)
+    }
+
+    #[setter]
+    fn set_update_rate(self_: PyRef<Self>, update_rate: f64) {
+        setter!(self_, LiBTrainer, update_rate, update_rate);
+    }
+
+    #[getter]
+    fn get_special_tokens(self_: PyRef<Self>) -> Vec<PyAddedToken> {
+        getter!(
+            self_,
+            LiBTrainer,
+            special_tokens
+                .iter()
+                .map(|tok| tok.clone().into())
+                .collect()
+        )
+    }
+
+    #[setter]
+    fn set_special_tokens(self_: PyRef<Self>, special_tokens: &Bound<'_, PyList>) -> PyResult<()> {
+        setter!(
+            self_,
+            LiBTrainer,
+            special_tokens,
+            special_tokens
+                .into_iter()
+                .map(|token| {
+                    if let Ok(content) = token.extract::<String>() {
+                        Ok(tk::tokenizer::AddedToken::from(content, true))
+                    } else if let Ok(mut token) = token.extract::<PyRefMut<PyAddedToken>>() {
+                        token.special = true;
+                        Ok(token.get_token())
+                    } else {
+                        Err(exceptions::PyTypeError::new_err(
+                            "Special tokens must be a List[Union[str, AddedToken]]",
+                        ))
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        );
+        Ok(())
+    }
+
+    #[new]
+    #[pyo3(
+        signature = (**kwargs),
+        text_signature = "(self, vocab_size=30000, num_epochs=10000, life=10, max_len=12, memory_in=0.25, memory_out=0.0001, update_rate=0.2, seed=None, deterministic=False, special_tokens=[])"
+    )]
+    fn new(kwargs: Option<Bound<'_, PyDict>>) -> PyResult<(Self, PyTrainer)> {
+        let mut builder = LiBTrainer::builder();
+        if let Some(kwargs) = kwargs {
+            for (key, val) in kwargs {
+                let key: String = key.extract()?;
+                match key.as_ref() {
+                    "vocab_size" => { builder = builder.vocab_size(val.extract()?); }
+                    "num_epochs" => { builder = builder.num_epochs(val.extract()?); }
+                    "life" => { builder = builder.life(val.extract()?); }
+                    "max_len" => { builder = builder.max_len(val.extract()?); }
+                    "memory_in" => { builder = builder.memory_in(val.extract()?); }
+                    "memory_out" => { builder = builder.memory_out(val.extract()?); }
+                    "update_rate" => { builder = builder.update_rate(val.extract()?); }
+                    "seed" => { builder = builder.seed(val.extract()?); }
+                    "deterministic" => { builder = builder.deterministic(val.extract()?); }
+                    "special_tokens" => {
+                        builder = builder.special_tokens(
+                            val.downcast::<PyList>()?
+                                .into_iter()
+                                .map(|token| {
+                                    if let Ok(content) = token.extract::<String>() {
+                                        Ok(PyAddedToken::from(content, Some(true)).get_token())
+                                    } else if let Ok(mut token) =
+                                        token.extract::<PyRefMut<PyAddedToken>>()
+                                    {
+                                        token.special = true;
+                                        Ok(token.get_token())
+                                    } else {
+                                        Err(exceptions::PyTypeError::new_err(
+                                            "special_tokens must be a List[Union[str, AddedToken]]",
+                                        ))
+                                    }
+                                })
+                                .collect::<PyResult<Vec<_>>>()?,
+                        );
+                    }
+                    _ => {
+                        println!("Ignored unknown kwargs option {key}");
+                    }
+                };
+            }
+        }
+        let trainer = builder.build();
+        Ok((PyLiBTrainer {}, trainer.into()))
+    }
+}
+
 /// Trainers Module
 #[pymodule]
 pub fn trainers(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -893,6 +1086,7 @@ pub fn trainers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWordPieceTrainer>()?;
     m.add_class::<PyWordLevelTrainer>()?;
     m.add_class::<PyUnigramTrainer>()?;
+    m.add_class::<PyLiBTrainer>()?;
     Ok(())
 }
 

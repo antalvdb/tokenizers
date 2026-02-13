@@ -20,6 +20,11 @@ impl LiBModel {
         }
     }
 
+    /// Add a token to the vocabulary with the given life value.
+    pub fn add_token(&mut self, token: String, life: i32) {
+        self.trie.append(token, life);
+    }
+
     /// Lookahead heuristic: when both the longest and second-longest match
     /// exist, peek one step ahead after each choice.  Prefer the choice
     /// whose continuation yields a known token.  If tied, prefer the

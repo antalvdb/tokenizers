@@ -13,6 +13,7 @@ use tk::models::bpe::{BpeBuilder, Merges, BPE};
 use tk::models::unigram::Unigram;
 use tk::models::wordlevel::WordLevel;
 use tk::models::wordpiece::{WordPiece, WordPieceBuilder};
+use tk::models::lib::LiBModel;
 use tk::models::ModelWrapper;
 use tk::{Model, Token};
 use tokenizers as tk;
@@ -40,6 +41,7 @@ impl PyModel {
             ModelWrapper::WordPiece(_) => Py::new(py, (PyWordPiece {}, base))?.into_any(),
             ModelWrapper::WordLevel(_) => Py::new(py, (PyWordLevel {}, base))?.into_any(),
             ModelWrapper::Unigram(_) => Py::new(py, (PyUnigram {}, base))?.into_any(),
+            ModelWrapper::LiB(_) => Py::new(py, (PyLiB {}, base))?.into_any(),
         })
     }
 }
@@ -919,6 +921,45 @@ impl PyUnigram {
     }
 }
 
+/// LiB (Less is Better) Model
+///
+/// A cognitively-inspired tokenization model that builds a hierarchical
+/// vocabulary of subwords, words, and supra-words.
+///
+/// Args:
+///     vocab (:obj:`Dict[str, int]`, `optional`):
+///         A vocabulary mapping token strings to IDs.
+///     max_len (:obj:`int`, `optional`):
+///         Maximum token length in characters. Default: 12.
+///     unk_token (:obj:`str`, `optional`):
+///         The unknown token string.
+#[pyclass(extends=PyModel, module = "tokenizers.models", name = "LiB")]
+pub struct PyLiB {}
+
+#[pymethods]
+impl PyLiB {
+    #[new]
+    #[pyo3(signature = (vocab=None, max_len=12, unk_token=None), text_signature = "(self, vocab=None, max_len=12, unk_token=None)")]
+    fn new(
+        vocab: Option<HashMap<String, u32>>,
+        max_len: usize,
+        unk_token: Option<String>,
+    ) -> PyResult<(Self, PyModel)> {
+        let mut model = LiBModel::new(max_len, unk_token);
+
+        if let Some(vocab_map) = vocab {
+            // Sort by ID to maintain priority order
+            let mut entries: Vec<(String, u32)> = vocab_map.into_iter().collect();
+            entries.sort_by_key(|(_, id)| *id);
+            for (token, _) in entries {
+                model.add_token(token, 10);
+            }
+        }
+
+        Ok((PyLiB {}, model.into()))
+    }
+}
+
 /// Models Module
 #[pymodule]
 pub fn models(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -927,6 +968,7 @@ pub fn models(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWordPiece>()?;
     m.add_class::<PyWordLevel>()?;
     m.add_class::<PyUnigram>()?;
+    m.add_class::<PyLiB>()?;
     Ok(())
 }
 
