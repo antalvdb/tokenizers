@@ -70,6 +70,7 @@ pub enum ModelWrapper {
     WordPiece(WordPiece),
     WordLevel(WordLevel),
     Unigram(Unigram),
+    LiB(LiBModel),
 }
 
 impl<'de> Deserialize<'de> for ModelWrapper {
@@ -90,6 +91,7 @@ impl<'de> Deserialize<'de> for ModelWrapper {
             WordPiece,
             WordLevel,
             Unigram,
+            LiB,
         }
 
         #[derive(Deserialize)]
@@ -125,6 +127,14 @@ impl<'de> Deserialize<'de> for ModelWrapper {
                 EnumType::Unigram => ModelWrapper::Unigram(
                     serde_json::from_value(model.rest).map_err(serde::de::Error::custom)?,
                 ),
+                EnumType::LiB => {
+                    // LiB needs the full value including the "type" field for its custom deserializer
+                    let mut full = model.rest;
+                    full.as_object_mut().unwrap().insert("type".to_string(), serde_json::Value::String("LiB".to_string()));
+                    ModelWrapper::LiB(
+                        serde_json::from_value(full).map_err(serde::de::Error::custom)?,
+                    )
+                }
             },
             ModelHelper::Legacy(value) => {
                 let untagged = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
@@ -143,6 +153,7 @@ impl_enum_from!(WordLevel, ModelWrapper, WordLevel);
 impl_enum_from!(WordPiece, ModelWrapper, WordPiece);
 impl_enum_from!(BPE, ModelWrapper, BPE);
 impl_enum_from!(Unigram, ModelWrapper, Unigram);
+impl_enum_from!(LiBModel, ModelWrapper, LiB);
 
 impl Model for ModelWrapper {
     type Trainer = TrainerWrapper;
@@ -153,6 +164,7 @@ impl Model for ModelWrapper {
             Self::WordPiece(t) => t.tokenize(tokens),
             Self::BPE(t) => t.tokenize(tokens),
             Self::Unigram(t) => t.tokenize(tokens),
+            Self::LiB(t) => t.tokenize(tokens),
         }
     }
 
@@ -162,6 +174,7 @@ impl Model for ModelWrapper {
             Self::WordPiece(t) => t.token_to_id(token),
             Self::BPE(t) => t.token_to_id(token),
             Self::Unigram(t) => t.token_to_id(token),
+            Self::LiB(t) => t.token_to_id(token),
         }
     }
 
@@ -171,6 +184,7 @@ impl Model for ModelWrapper {
             Self::WordPiece(t) => t.id_to_token(id),
             Self::BPE(t) => t.id_to_token(id),
             Self::Unigram(t) => t.id_to_token(id),
+            Self::LiB(t) => t.id_to_token(id),
         }
     }
 
@@ -180,6 +194,7 @@ impl Model for ModelWrapper {
             Self::WordPiece(t) => t.get_vocab(),
             Self::BPE(t) => t.get_vocab(),
             Self::Unigram(t) => t.get_vocab(),
+            Self::LiB(t) => t.get_vocab(),
         }
     }
 
@@ -189,6 +204,7 @@ impl Model for ModelWrapper {
             Self::WordPiece(t) => t.get_vocab_size(),
             Self::BPE(t) => t.get_vocab_size(),
             Self::Unigram(t) => t.get_vocab_size(),
+            Self::LiB(t) => t.get_vocab_size(),
         }
     }
 
@@ -198,6 +214,7 @@ impl Model for ModelWrapper {
             Self::WordPiece(t) => t.save(folder, name),
             Self::BPE(t) => t.save(folder, name),
             Self::Unigram(t) => t.save(folder, name),
+            Self::LiB(t) => t.save(folder, name),
         }
     }
 
@@ -207,6 +224,7 @@ impl Model for ModelWrapper {
             Self::WordPiece(t) => t.get_trainer().into(),
             Self::BPE(t) => t.get_trainer().into(),
             Self::Unigram(t) => t.get_trainer().into(),
+            Self::LiB(t) => t.get_trainer().into(),
         }
     }
 }
@@ -234,6 +252,7 @@ pub enum TrainerWrapper {
     WordPieceTrainer(WordPieceTrainer),
     WordLevelTrainer(WordLevelTrainer),
     UnigramTrainer(UnigramTrainer),
+    LiBTrainer(LiBTrainer),
 }
 
 impl Trainer for TrainerWrapper {
@@ -245,6 +264,7 @@ impl Trainer for TrainerWrapper {
             Self::WordPieceTrainer(wpt) => wpt.should_show_progress(),
             Self::WordLevelTrainer(wpt) => wpt.should_show_progress(),
             Self::UnigramTrainer(wpt) => wpt.should_show_progress(),
+            Self::LiBTrainer(t) => t.should_show_progress(),
         }
     }
 
@@ -266,6 +286,10 @@ impl Trainer for TrainerWrapper {
                 ModelWrapper::Unigram(u) => t.train(u),
                 _ => Err("UnigramTrainer can only train a Unigram".into()),
             },
+            Self::LiBTrainer(t) => match model {
+                ModelWrapper::LiB(lib) => t.train(lib),
+                _ => Err("LiBTrainer can only train a LiB".into()),
+            },
         }
     }
 
@@ -280,6 +304,7 @@ impl Trainer for TrainerWrapper {
             Self::WordPieceTrainer(wpt) => wpt.feed(iterator, process),
             Self::WordLevelTrainer(wpt) => wpt.feed(iterator, process),
             Self::UnigramTrainer(wpt) => wpt.feed(iterator, process),
+            Self::LiBTrainer(t) => t.feed(iterator, process),
         }
     }
 }
@@ -288,6 +313,7 @@ impl_enum_from!(BpeTrainer, TrainerWrapper, BpeTrainer);
 impl_enum_from!(WordPieceTrainer, TrainerWrapper, WordPieceTrainer);
 impl_enum_from!(UnigramTrainer, TrainerWrapper, UnigramTrainer);
 impl_enum_from!(WordLevelTrainer, TrainerWrapper, WordLevelTrainer);
+impl_enum_from!(LiBTrainer, TrainerWrapper, LiBTrainer);
 
 #[cfg(test)]
 mod tests {
