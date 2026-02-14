@@ -933,19 +933,23 @@ impl PyUnigram {
 ///         Maximum token length in characters. Default: 12.
 ///     unk_token (:obj:`str`, `optional`):
 ///         The unknown token string.
+///     use_supra_words (:obj:`bool`, `optional`):
+///         Whether to use supra-word (multi-word) tokenization. Default: True.
 #[pyclass(extends=PyModel, module = "tokenizers.models", name = "LiB")]
 pub struct PyLiB {}
 
 #[pymethods]
 impl PyLiB {
     #[new]
-    #[pyo3(signature = (vocab=None, max_len=12, unk_token=None), text_signature = "(self, vocab=None, max_len=12, unk_token=None)")]
+    #[pyo3(signature = (vocab=None, max_len=12, unk_token=None, use_supra_words=true), text_signature = "(self, vocab=None, max_len=12, unk_token=None, use_supra_words=True)")]
     fn new(
         vocab: Option<HashMap<String, u32>>,
         max_len: usize,
         unk_token: Option<String>,
+        use_supra_words: bool,
     ) -> PyResult<(Self, PyModel)> {
         let mut model = LiBModel::new(max_len, unk_token);
+        model.use_supra_words = use_supra_words;
 
         if let Some(vocab_map) = vocab {
             // Sort by ID to maintain priority order
@@ -957,6 +961,16 @@ impl PyLiB {
         }
 
         Ok((PyLiB {}, model.into()))
+    }
+
+    #[getter]
+    fn get_use_supra_words(self_: PyRef<Self>) -> bool {
+        getter!(self_, LiB, use_supra_words)
+    }
+
+    #[setter]
+    fn set_use_supra_words(self_: PyRef<Self>, use_supra_words: bool) {
+        setter!(self_, LiB, use_supra_words, use_supra_words);
     }
 }
 
