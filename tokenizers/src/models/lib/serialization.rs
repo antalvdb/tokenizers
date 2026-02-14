@@ -15,10 +15,11 @@ impl Serialize for LiBModel {
             .map(|(_, entry)| (entry.token.as_str(), entry.life, entry.frequency))
             .collect();
 
-        let mut s = serializer.serialize_struct("LiBModel", 4)?;
+        let mut s = serializer.serialize_struct("LiBModel", 5)?;
         s.serialize_field("type", "LiB")?;
         s.serialize_field("max_len", &self.max_len)?;
         s.serialize_field("unk_token", &self.unk_token)?;
+        s.serialize_field("use_supra_words", &self.use_supra_words)?;
         s.serialize_field("vocab", &vocab)?;
         s.end()
     }
@@ -35,6 +36,7 @@ impl<'de> Deserialize<'de> for LiBModel {
             Type,
             MaxLen,
             UnkToken,
+            UseSupraWords,
             Vocab,
         }
 
@@ -53,6 +55,7 @@ impl<'de> Deserialize<'de> for LiBModel {
             {
                 let mut max_len: Option<usize> = None;
                 let mut unk_token: Option<Option<String>> = None;
+                let mut use_supra_words: Option<bool> = None;
                 let mut vocab: Option<Vec<(String, i32, u64)>> = None;
 
                 while let Some(key) = map.next_key()? {
@@ -72,6 +75,9 @@ impl<'de> Deserialize<'de> for LiBModel {
                         Field::UnkToken => {
                             unk_token = Some(map.next_value()?);
                         }
+                        Field::UseSupraWords => {
+                            use_supra_words = Some(map.next_value()?);
+                        }
                         Field::Vocab => {
                             vocab = Some(map.next_value()?);
                         }
@@ -86,12 +92,13 @@ impl<'de> Deserialize<'de> for LiBModel {
                 for (token, life, _freq) in vocab {
                     model.trie.append(token, life);
                 }
+                model.use_supra_words = use_supra_words.unwrap_or(true);
 
                 Ok(model)
             }
         }
 
-        const FIELDS: &[&str] = &["type", "max_len", "unk_token", "vocab"];
+        const FIELDS: &[&str] = &["type", "max_len", "unk_token", "use_supra_words", "vocab"];
         deserializer.deserialize_struct("LiBModel", FIELDS, LiBModelVisitor)
     }
 }
@@ -133,6 +140,26 @@ mod tests {
             "JSON should contain type discriminator: {}",
             json
         );
+    }
+
+    #[test]
+    fn test_serialization_use_supra_words() {
+        let mut model = LiBModel::new(12, None);
+        model.trie.append("hello".to_string(), 10);
+        model.trie.append("hello world".to_string(), 10);
+        model.use_supra_words = false;
+
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(json.contains("\"use_supra_words\":false") || json.contains("\"use_supra_words\": false"),
+            "JSON should contain use_supra_words: {}", json);
+
+        let deserialized: LiBModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.use_supra_words, false);
+
+        // Backward compat: JSON without the field defaults to true
+        let old_json = r#"{"type":"LiB","max_len":12,"unk_token":null,"vocab":[["a",10,0]]}"#;
+        let old_model: LiBModel = serde_json::from_str(old_json).unwrap();
+        assert_eq!(old_model.use_supra_words, true);
     }
 
     #[test]
