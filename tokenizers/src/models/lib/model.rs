@@ -49,8 +49,8 @@ impl LiBModel {
         let window_best: String = remaining_after_best.chars().take(self.max_len).collect();
         let window_second: String = remaining_after_second.chars().take(self.max_len).collect();
 
-        let has_next_best = self.trie.match_longest(&window_best).is_some();
-        let has_next_second = self.trie.match_longest(&window_second).is_some();
+        let has_next_best = self.trie.match_longest(&window_best, false).is_some();
+        let has_next_second = self.trie.match_longest(&window_second, false).is_some();
 
         match (has_next_best, has_next_second) {
             // Both have continuations, or neither does: prefer longest (greedy)
@@ -85,7 +85,7 @@ impl Model for LiBModel {
             let rest = &sequence[byte_pos..];
             let window: String = rest.chars().take(self.max_len).collect();
 
-            let (best, second) = self.trie.match_two(&window);
+            let (best, second) = self.trie.match_two(&window, false);
 
             match (best, second) {
                 (Some(b), Some(s)) => {

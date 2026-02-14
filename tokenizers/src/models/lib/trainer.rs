@@ -149,7 +149,7 @@ impl LiBTrainer {
             let rest = &sentence[byte_pos..];
             let window: String = rest.chars().take(model.max_len).collect();
 
-            match model.trie.match_longest(&window) {
+            match model.trie.match_longest(&window, false) {
                 Some((token, _id)) => {
                     let len = token.len();
                     chunks.push((token, true));
@@ -197,7 +197,7 @@ impl LiBTrainer {
             }
 
             let window: String = rest.chars().take(model.max_len).collect();
-            match model.trie.match_longest(&window) {
+            match model.trie.match_longest(&window, false) {
                 Some((token, _)) => {
                     count += 1;
                     byte_pos += token.len();

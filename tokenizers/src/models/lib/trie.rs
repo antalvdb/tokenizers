@@ -154,7 +154,7 @@ impl TrieList {
 
     /// Longest-prefix match: walk the trie from the start of `input`,
     /// returning the longest token that matches and its ID.
-    pub fn match_longest(&self, input: &str) -> Option<(String, usize)> {
+    pub fn match_longest(&self, input: &str, skip_spaces: bool) -> Option<(String, usize)> {
         let mut node_idx: usize = 0;
         let mut best: Option<(String, usize)> = None;
         let mut consumed = String::new();
@@ -165,7 +165,9 @@ impl TrieList {
                     node_idx = next;
                     consumed.push(ch);
                     if let Some(tok_id) = self.nodes[node_idx].token_index {
-                        best = Some((consumed.clone(), tok_id));
+                        if !skip_spaces || !consumed.contains(' ') {
+                            best = Some((consumed.clone(), tok_id));
+                        }
                     }
                 }
                 None => break,
@@ -179,6 +181,7 @@ impl TrieList {
     pub fn match_two(
         &self,
         input: &str,
+        skip_spaces: bool,
     ) -> (Option<(String, usize)>, Option<(String, usize)>) {
         let mut node_idx: usize = 0;
         let mut best: Option<(String, usize)> = None;
@@ -191,8 +194,10 @@ impl TrieList {
                     node_idx = next;
                     consumed.push(ch);
                     if let Some(tok_id) = self.nodes[node_idx].token_index {
-                        second = best.clone();
-                        best = Some((consumed.clone(), tok_id));
+                        if !skip_spaces || !consumed.contains(' ') {
+                            second = best.clone();
+                            best = Some((consumed.clone(), tok_id));
+                        }
                     }
                 }
                 None => break,
@@ -364,15 +369,15 @@ mod tests {
         tl.append("hel".to_string(), 1);
         tl.append("hello".to_string(), 1);
 
-        let result = tl.match_longest("hello world");
+        let result = tl.match_longest("hello world", false);
         assert_eq!(result, Some(("hello".to_string(), 3)));
 
         // partial match should return longest that exists
-        let result = tl.match_longest("help me");
+        let result = tl.match_longest("help me", false);
         assert_eq!(result, Some(("hel".to_string(), 2)));
 
         // single char
-        let result = tl.match_longest("hat");
+        let result = tl.match_longest("hat", false);
         assert_eq!(result, Some(("h".to_string(), 0)));
     }
 
@@ -385,17 +390,17 @@ mod tests {
         tl.append("hel".to_string(), 1);
         tl.append("hello".to_string(), 1);
 
-        let (best, second) = tl.match_two("hello world");
+        let (best, second) = tl.match_two("hello world", false);
         assert_eq!(best, Some(("hello".to_string(), 3)));
         assert_eq!(second, Some(("hel".to_string(), 2)));
 
         // only two matches
-        let (best, second) = tl.match_two("help");
+        let (best, second) = tl.match_two("help", false);
         assert_eq!(best, Some(("hel".to_string(), 2)));
         assert_eq!(second, Some(("he".to_string(), 1)));
 
         // only one match
-        let (best, second) = tl.match_two("hat");
+        let (best, second) = tl.match_two("hat", false);
         assert_eq!(best, Some(("h".to_string(), 0)));
         assert_eq!(second, None);
     }
@@ -404,16 +409,16 @@ mod tests {
     #[test]
     fn test_match_no_match() {
         let tl = TrieList::new();
-        assert_eq!(tl.match_longest("anything"), None);
+        assert_eq!(tl.match_longest("anything", false), None);
 
-        let (best, second) = tl.match_two("anything");
+        let (best, second) = tl.match_two("anything", false);
         assert_eq!(best, None);
         assert_eq!(second, None);
 
         // also test non-empty trie with no matching prefix
         let mut tl2 = TrieList::new();
         tl2.append("xyz".to_string(), 1);
-        assert_eq!(tl2.match_longest("abc"), None);
+        assert_eq!(tl2.match_longest("abc", false), None);
     }
 
     // 7. test_unicode
@@ -429,10 +434,10 @@ mod tests {
         assert!(tl.search("\u{4e16}\u{754c}"));
         assert!(tl.search("\u{1f600}"));
 
-        let result = tl.match_longest("\u{00e9}t\u{00e9} hello");
+        let result = tl.match_longest("\u{00e9}t\u{00e9} hello", false);
         assert_eq!(result, Some(("\u{00e9}t\u{00e9}".to_string(), 1)));
 
-        let result = tl.match_longest("\u{4e16}\u{754c}!");
+        let result = tl.match_longest("\u{4e16}\u{754c}!", false);
         assert_eq!(result, Some(("\u{4e16}\u{754c}".to_string(), 2)));
     }
 
@@ -510,7 +515,7 @@ mod tests {
         assert_eq!(tl.token_to_id("epsilon"), Some(2));
 
         // Trie should still work
-        let result = tl.match_longest("gamma ray");
+        let result = tl.match_longest("gamma ray", false);
         assert_eq!(result, Some(("gamma".to_string(), 1)));
     }
 
@@ -607,5 +612,43 @@ mod tests {
         let entry = tl.get_entry(0).unwrap();
         assert_eq!(entry.frequency, 10);
         assert_eq!(entry.life, 4);
+    }
+
+    // test_match_longest_skip_spaces
+    #[test]
+    fn test_match_longest_skip_spaces() {
+        let mut tl = TrieList::new();
+        tl.append("the".to_string(), 1);
+        tl.append("the cat".to_string(), 1);
+        tl.append("the cat sat".to_string(), 1);
+
+        let result = tl.match_longest("the cat sat on", false);
+        assert_eq!(result, Some(("the cat sat".to_string(), 2)));
+
+        let result = tl.match_longest("the cat sat on", true);
+        assert_eq!(result, Some(("the".to_string(), 0)));
+
+        let result = tl.match_longest("the", true);
+        assert_eq!(result, Some(("the".to_string(), 0)));
+
+        let result = tl.match_longest("xyz", true);
+        assert_eq!(result, None);
+    }
+
+    // test_match_two_skip_spaces
+    #[test]
+    fn test_match_two_skip_spaces() {
+        let mut tl = TrieList::new();
+        tl.append("the".to_string(), 1);
+        tl.append("the cat".to_string(), 1);
+        tl.append("the cat sat".to_string(), 1);
+
+        let (best, second) = tl.match_two("the cat sat on", false);
+        assert_eq!(best, Some(("the cat sat".to_string(), 2)));
+        assert_eq!(second, Some(("the cat".to_string(), 1)));
+
+        let (best, second) = tl.match_two("the cat sat on", true);
+        assert_eq!(best, Some(("the".to_string(), 0)));
+        assert_eq!(second, None);
     }
 }
