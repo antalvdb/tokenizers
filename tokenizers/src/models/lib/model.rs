@@ -9,6 +9,7 @@ pub struct LiBModel {
     pub(crate) trie: TrieList,
     pub max_len: usize,
     pub unk_token: Option<String>,
+    pub use_supra_words: bool,
 }
 
 impl LiBModel {
@@ -17,6 +18,7 @@ impl LiBModel {
             trie: TrieList::new(),
             max_len,
             unk_token,
+            use_supra_words: true,
         }
     }
 
@@ -35,6 +37,7 @@ impl LiBModel {
         byte_pos: usize,
         best: &'a (String, usize),
         second: &'a (String, usize),
+        skip_spaces: bool,
     ) -> &'a (String, usize) {
         let remaining_after_best = &sequence[byte_pos + best.0.len()..];
         let remaining_after_second = &sequence[byte_pos + second.0.len()..];
@@ -45,12 +48,27 @@ impl LiBModel {
             return best;
         }
 
-        // Build the lookahead window (up to max_len chars) for each choice
-        let window_best: String = remaining_after_best.chars().take(self.max_len).collect();
-        let window_second: String = remaining_after_second.chars().take(self.max_len).collect();
+        // When skip_spaces is set, leading spaces in the remainder are word
+        // boundaries that will be emitted as their own tokens.  Strip them so
+        // the lookahead checks the *next word*, not the space itself (which
+        // match_longest would reject because it contains a space).
+        let lookahead_best = if skip_spaces {
+            remaining_after_best.trim_start_matches(' ')
+        } else {
+            remaining_after_best
+        };
+        let lookahead_second = if skip_spaces {
+            remaining_after_second.trim_start_matches(' ')
+        } else {
+            remaining_after_second
+        };
 
-        let has_next_best = self.trie.match_longest(&window_best, false).is_some();
-        let has_next_second = self.trie.match_longest(&window_second, false).is_some();
+        // Build the lookahead window (up to max_len chars) for each choice
+        let window_best: String = lookahead_best.chars().take(self.max_len).collect();
+        let window_second: String = lookahead_second.chars().take(self.max_len).collect();
+
+        let has_next_best = self.trie.match_longest(&window_best, skip_spaces).is_some();
+        let has_next_second = self.trie.match_longest(&window_second, skip_spaces).is_some();
 
         match (has_next_best, has_next_second) {
             // Both have continuations, or neither does: prefer longest (greedy)
@@ -77,6 +95,7 @@ impl Model for LiBModel {
             return Ok(Vec::new());
         }
 
+        let skip_spaces = !self.use_supra_words;
         let mut tokens = Vec::new();
         let mut byte_pos: usize = 0;
 
@@ -85,11 +104,11 @@ impl Model for LiBModel {
             let rest = &sequence[byte_pos..];
             let window: String = rest.chars().take(self.max_len).collect();
 
-            let (best, second) = self.trie.match_two(&window, false);
+            let (best, second) = self.trie.match_two(&window, skip_spaces);
 
             match (best, second) {
                 (Some(b), Some(s)) => {
-                    let chosen = self.choose_best(sequence, byte_pos, &b, &s);
+                    let chosen = self.choose_best(sequence, byte_pos, &b, &s, skip_spaces);
                     let tok_str = &chosen.0;
                     let tok_id = chosen.1 as u32;
                     let byte_end = byte_pos + tok_str.len();
@@ -295,7 +314,27 @@ mod tests {
         let _ = std::fs::remove_file(&paths[0]);
     }
 
-    // 10. test_unicode_offsets
+    // 10. test_tokenize_supra_word_disabled
+    #[test]
+    fn test_tokenize_supra_word_disabled() {
+        let mut model = make_model(&["t", "h", "e", " ", "c", "a", "the", "cat", "the cat"]);
+
+        // Default: supra-words enabled — "the cat" is one token
+        let tokens = model.tokenize("the cat").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].value, "the cat");
+
+        // Disable supra-words — falls back to word-level + space
+        model.use_supra_words = false;
+        let tokens = model.tokenize("the cat").unwrap();
+        assert_eq!(tokens.len(), 3, "Expected [the, ' ', cat], got: {:?}",
+            tokens.iter().map(|t| &t.value).collect::<Vec<_>>());
+        assert_eq!(tokens[0].value, "the");
+        assert_eq!(tokens[1].value, " ");
+        assert_eq!(tokens[2].value, "cat");
+    }
+
+    // 11. test_unicode_offsets
     #[test]
     fn test_unicode_offsets() {
         // e-acute is 2 bytes in UTF-8
