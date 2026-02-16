@@ -1,4 +1,5 @@
 use crate::models::lib::model::LiBModel;
+use crate::utils::progress::{ProgressBar, ProgressStyle};
 use crate::{AddedToken, Result, Trainer};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ impl Default for LiBTrainerBuilder {
     fn default() -> Self {
         Self {
             vocab_size: 30000,
-            num_epochs: 10000,
+            num_epochs: 5000,
             life: 10,
             max_len: 12,
             memory_in: 0.25,
@@ -264,10 +265,25 @@ impl Trainer for LiBTrainer {
             return Ok(self.special_tokens.clone());
         }
 
+        let progress = if self.should_show_progress() {
+            let p = ProgressBar::new(self.num_epochs as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] {msg:<40!} {wide_bar} {pos:<9!}/{len:>9!}")
+                    .expect("Invalid progress template"),
+            );
+            p.set_message(format!("Vocab: {} tokens", model.trie.len()));
+            Some(p)
+        } else {
+            None
+        };
+
         for epoch in 0..self.num_epochs {
             if model.trie.len() >= self.vocab_size {
                 break;
             }
+
+            let vocab_before = model.trie.len();
 
             // Sample a sentence
             let sentence = if self.deterministic {
@@ -314,6 +330,22 @@ impl Trainer for LiBTrainer {
 
             // Prune: remove bottom fraction
             model.trie.prune(self.memory_out);
+
+            let vocab_after = model.trie.len();
+            let delta = vocab_after as i64 - vocab_before as i64;
+
+            if let Some(ref p) = progress {
+                p.inc(1);
+                p.set_message(format!(
+                    "Vocab: {} tokens (chg: {:+})",
+                    vocab_after, delta
+                ));
+            }
+        }
+
+        if let Some(ref p) = progress {
+            p.set_message(format!("Vocab: {} tokens", model.trie.len()));
+            p.finish();
         }
 
         Ok(self.special_tokens.clone())
