@@ -28,7 +28,7 @@ impl Default for LiBTrainerBuilder {
     fn default() -> Self {
         Self {
             vocab_size: 30000,
-            num_epochs: 5000,
+            num_epochs: 10000,
             life: 10,
             max_len: 12,
             memory_in: 0.25,
@@ -511,7 +511,7 @@ mod tests {
     fn test_builder_defaults() {
         let trainer = LiBTrainer::default();
         assert_eq!(trainer.vocab_size, 30000);
-        assert_eq!(trainer.num_epochs, 5000);
+        assert_eq!(trainer.num_epochs, 10000);
         assert_eq!(trainer.life, 10);
         assert_eq!(trainer.max_len, 12);
         assert!((trainer.memory_in - 0.25).abs() < f64::EPSILON);

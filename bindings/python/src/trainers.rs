@@ -1041,7 +1041,7 @@ impl PyLiBTrainer {
     #[new]
     #[pyo3(
         signature = (**kwargs),
-        text_signature = "(self, vocab_size=30000, num_epochs=5000, life=10, max_len=12, memory_in=0.25, memory_out=0.0001, update_rate=0.2, seed=None, deterministic=False, byte_fallback=True, special_tokens=[])"
+        text_signature = "(self, vocab_size=30000, num_epochs=10000, life=10, max_len=12, memory_in=0.25, memory_out=0.0001, update_rate=0.2, seed=None, deterministic=False, byte_fallback=True, special_tokens=[])"
     )]
     fn new(kwargs: Option<Bound<'_, PyDict>>) -> PyResult<(Self, PyTrainer)> {
         let mut builder = LiBTrainer::builder();
