@@ -10,6 +10,7 @@ pub struct LiBModel {
     pub max_len: usize,
     pub unk_token: Option<String>,
     pub use_supra_words: bool,
+    pub byte_fallback: bool,
 }
 
 impl LiBModel {
@@ -19,6 +20,7 @@ impl LiBModel {
             max_len,
             unk_token,
             use_supra_words: true,
+            byte_fallback: true,
         }
     }
 
@@ -126,11 +128,21 @@ impl Model for LiBModel {
                     let ch_str = ch.to_string();
                     let byte_end = byte_pos + ch.len_utf8();
 
-                    // Look up the single character; if not in vocab, use 0 as unknown id
-                    let id = self.trie.token_to_id(&ch_str)
-                        .map(|id| id as u32)
-                        .unwrap_or(0);
-                    tokens.push(Token::new(id, ch_str, (byte_pos, byte_end)));
+                    // Try direct lookup first
+                    if let Some(id) = self.trie.token_to_id(&ch_str) {
+                        tokens.push(Token::new(id as u32, ch_str, (byte_pos, byte_end)));
+                    } else if self.byte_fallback {
+                        // Decompose into UTF-8 byte tokens
+                        for (i, b) in ch_str.bytes().enumerate() {
+                            let code = format!("<{b:#04X}>");
+                            let id = self.trie.token_to_id(&code)
+                                .map(|id| id as u32)
+                                .unwrap_or(0);
+                            tokens.push(Token::new(id, code, (byte_pos + i, byte_pos + i + 1)));
+                        }
+                    } else {
+                        tokens.push(Token::new(0, ch_str, (byte_pos, byte_end)));
+                    }
                     byte_pos = byte_end;
                 }
             }
@@ -180,8 +192,10 @@ mod tests {
     use super::*;
 
     /// Helper: build a LiBModel with the given tokens (each gets life=10).
+    /// byte_fallback is off by default since test models don't include byte tokens.
     fn make_model(tokens: &[&str]) -> LiBModel {
         let mut model = LiBModel::new(12, None);
+        model.byte_fallback = false;
         for tok in tokens {
             model.trie.append(tok.to_string(), 10);
         }
@@ -345,5 +359,32 @@ mod tests {
         assert_eq!(tokens[0].offsets, (0, 2)); // e-acute is 2 bytes
         assert_eq!(tokens[1].value, "t");
         assert_eq!(tokens[1].offsets, (2, 3));
+    }
+
+    // 12. test_byte_fallback
+    #[test]
+    fn test_byte_fallback() {
+        // Build a model with byte tokens and byte_fallback enabled
+        let mut model = LiBModel::new(12, None);
+        model.byte_fallback = true;
+        // Add byte tokens for all 256 bytes
+        for b in 0..=255u8 {
+            model.trie.append(format!("<{b:#04X}>"), 10);
+        }
+        model.trie.append("h".to_string(), 10);
+        model.trie.append("e".to_string(), 10);
+
+        // 'x' is not in vocab — should decompose to <0x78>
+        let tokens = model.tokenize("hex").unwrap();
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].value, "h");
+        assert_eq!(tokens[1].value, "e");
+        assert_eq!(tokens[2].value, "<0x78>");
+
+        // Multi-byte char: é (U+00E9) = 0xC3 0xA9 in UTF-8
+        let tokens = model.tokenize("\u{00e9}").unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].value, "<0xC3>");
+        assert_eq!(tokens[1].value, "<0xA9>");
     }
 }

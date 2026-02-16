@@ -20,6 +20,7 @@ pub struct LiBTrainerBuilder {
     update_rate: f64,
     seed: Option<u64>,
     deterministic: bool,
+    byte_fallback: bool,
     special_tokens: Vec<AddedToken>,
 }
 
@@ -35,6 +36,7 @@ impl Default for LiBTrainerBuilder {
             update_rate: 0.2,
             seed: None,
             deterministic: false,
+            byte_fallback: true,
             special_tokens: Vec::new(),
         }
     }
@@ -77,6 +79,10 @@ impl LiBTrainerBuilder {
         self.deterministic = d;
         self
     }
+    pub fn byte_fallback(mut self, b: bool) -> Self {
+        self.byte_fallback = b;
+        self
+    }
     pub fn special_tokens(mut self, tokens: Vec<AddedToken>) -> Self {
         self.special_tokens = tokens;
         self
@@ -92,6 +98,7 @@ impl LiBTrainerBuilder {
             update_rate: self.update_rate,
             seed: self.seed,
             deterministic: self.deterministic,
+            byte_fallback: self.byte_fallback,
             special_tokens: self.special_tokens,
             word_counts: HashMap::new(),
             char_set: HashSet::new(),
@@ -125,6 +132,7 @@ pub struct LiBTrainer {
     pub update_rate: f64,
     pub seed: Option<u64>,
     pub deterministic: bool,
+    pub byte_fallback: bool,
     pub special_tokens: Vec<AddedToken>,
 
     #[serde(skip)]
@@ -243,14 +251,38 @@ impl Trainer for LiBTrainer {
 
     fn train(&self, model: &mut LiBModel) -> Result<Vec<AddedToken>> {
         model.max_len = self.max_len;
+        model.byte_fallback = self.byte_fallback;
 
-        // Phase 1: Initialize vocabulary with sorted characters
-        let mut chars: Vec<char> = self.char_set.iter().copied().collect();
-        chars.sort();
-        for ch in &chars {
-            let s = ch.to_string();
-            if !model.trie.search(&s) {
-                model.trie.append(s, self.life);
+        // Phase 1: Initialize vocabulary
+        if self.byte_fallback {
+            // Add 256 byte tokens (<0x00>..<0xFF>)
+            for b in 0..=255u8 {
+                let code = format!("<{b:#04X}>");
+                if !model.trie.search(&code) {
+                    model.trie.append(code, self.life);
+                }
+            }
+            // Add Latin/ASCII characters from the corpus
+            let mut chars: Vec<char> = self.char_set.iter()
+                .copied()
+                .filter(|ch| ch.is_ascii())
+                .collect();
+            chars.sort();
+            for ch in &chars {
+                let s = ch.to_string();
+                if !model.trie.search(&s) {
+                    model.trie.append(s, self.life);
+                }
+            }
+        } else {
+            // Original behavior: seed all unique characters
+            let mut chars: Vec<char> = self.char_set.iter().copied().collect();
+            chars.sort();
+            for ch in &chars {
+                let s = ch.to_string();
+                if !model.trie.search(&s) {
+                    model.trie.append(s, self.life);
+                }
             }
         }
 
@@ -479,7 +511,7 @@ mod tests {
     fn test_builder_defaults() {
         let trainer = LiBTrainer::default();
         assert_eq!(trainer.vocab_size, 30000);
-        assert_eq!(trainer.num_epochs, 10000);
+        assert_eq!(trainer.num_epochs, 5000);
         assert_eq!(trainer.life, 10);
         assert_eq!(trainer.max_len, 12);
         assert!((trainer.memory_in - 0.25).abs() < f64::EPSILON);
@@ -487,5 +519,6 @@ mod tests {
         assert!((trainer.update_rate - 0.2).abs() < f64::EPSILON);
         assert!(trainer.seed.is_none());
         assert!(!trainer.deterministic);
+        assert!(trainer.byte_fallback);
     }
 }

@@ -15,11 +15,12 @@ impl Serialize for LiBModel {
             .map(|(_, entry)| (entry.token.as_str(), entry.life, entry.frequency))
             .collect();
 
-        let mut s = serializer.serialize_struct("LiBModel", 5)?;
+        let mut s = serializer.serialize_struct("LiBModel", 6)?;
         s.serialize_field("type", "LiB")?;
         s.serialize_field("max_len", &self.max_len)?;
         s.serialize_field("unk_token", &self.unk_token)?;
         s.serialize_field("use_supra_words", &self.use_supra_words)?;
+        s.serialize_field("byte_fallback", &self.byte_fallback)?;
         s.serialize_field("vocab", &vocab)?;
         s.end()
     }
@@ -37,6 +38,7 @@ impl<'de> Deserialize<'de> for LiBModel {
             MaxLen,
             UnkToken,
             UseSupraWords,
+            ByteFallback,
             Vocab,
         }
 
@@ -56,6 +58,7 @@ impl<'de> Deserialize<'de> for LiBModel {
                 let mut max_len: Option<usize> = None;
                 let mut unk_token: Option<Option<String>> = None;
                 let mut use_supra_words: Option<bool> = None;
+                let mut byte_fallback: Option<bool> = None;
                 let mut vocab: Option<Vec<(String, i32, u64)>> = None;
 
                 while let Some(key) = map.next_key()? {
@@ -78,6 +81,9 @@ impl<'de> Deserialize<'de> for LiBModel {
                         Field::UseSupraWords => {
                             use_supra_words = Some(map.next_value()?);
                         }
+                        Field::ByteFallback => {
+                            byte_fallback = Some(map.next_value()?);
+                        }
                         Field::Vocab => {
                             vocab = Some(map.next_value()?);
                         }
@@ -93,12 +99,13 @@ impl<'de> Deserialize<'de> for LiBModel {
                     model.trie.append(token, life);
                 }
                 model.use_supra_words = use_supra_words.unwrap_or(true);
+                model.byte_fallback = byte_fallback.unwrap_or(false);
 
                 Ok(model)
             }
         }
 
-        const FIELDS: &[&str] = &["type", "max_len", "unk_token", "use_supra_words", "vocab"];
+        const FIELDS: &[&str] = &["type", "max_len", "unk_token", "use_supra_words", "byte_fallback", "vocab"];
         deserializer.deserialize_struct("LiBModel", FIELDS, LiBModelVisitor)
     }
 }

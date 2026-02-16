@@ -912,6 +912,8 @@ impl PyUnigramTrainer {
 ///         Random seed for reproducibility.
 ///     deterministic (:obj:`bool`):
 ///         Use deterministic training mode. Default: False.
+///     byte_fallback (:obj:`bool`):
+///         Use byte-level fallback for unknown characters. Default: True.
 ///     special_tokens (:obj:`List[Union[str, AddedToken]]`):
 ///         Special tokens to add to the vocabulary.
 #[pyclass(extends=PyTrainer, module = "tokenizers.trainers", name = "LiBTrainer")]
@@ -990,6 +992,16 @@ impl PyLiBTrainer {
     }
 
     #[getter]
+    fn get_byte_fallback(self_: PyRef<Self>) -> bool {
+        getter!(self_, LiBTrainer, byte_fallback)
+    }
+
+    #[setter]
+    fn set_byte_fallback(self_: PyRef<Self>, byte_fallback: bool) {
+        setter!(self_, LiBTrainer, byte_fallback, byte_fallback);
+    }
+
+    #[getter]
     fn get_special_tokens(self_: PyRef<Self>) -> Vec<PyAddedToken> {
         getter!(
             self_,
@@ -1029,7 +1041,7 @@ impl PyLiBTrainer {
     #[new]
     #[pyo3(
         signature = (**kwargs),
-        text_signature = "(self, vocab_size=30000, num_epochs=10000, life=10, max_len=12, memory_in=0.25, memory_out=0.0001, update_rate=0.2, seed=None, deterministic=False, special_tokens=[])"
+        text_signature = "(self, vocab_size=30000, num_epochs=5000, life=10, max_len=12, memory_in=0.25, memory_out=0.0001, update_rate=0.2, seed=None, deterministic=False, byte_fallback=True, special_tokens=[])"
     )]
     fn new(kwargs: Option<Bound<'_, PyDict>>) -> PyResult<(Self, PyTrainer)> {
         let mut builder = LiBTrainer::builder();
@@ -1046,6 +1058,7 @@ impl PyLiBTrainer {
                     "update_rate" => { builder = builder.update_rate(val.extract()?); }
                     "seed" => { builder = builder.seed(val.extract()?); }
                     "deterministic" => { builder = builder.deterministic(val.extract()?); }
+                    "byte_fallback" => { builder = builder.byte_fallback(val.extract()?); }
                     "special_tokens" => {
                         builder = builder.special_tokens(
                             val.downcast::<PyList>()?
