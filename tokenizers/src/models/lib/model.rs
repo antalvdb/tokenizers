@@ -33,14 +33,17 @@ impl LiBModel {
     /// exist, peek one step ahead after each choice.  Prefer the choice
     /// whose continuation yields a known token.  If tied, prefer the
     /// longest (greedy default).
+    ///
+    /// Both `best` and `second` are `(&str, usize)` (Copy), so they are
+    /// passed and returned by value.
     fn choose_best<'a>(
         &self,
-        sequence: &str,
+        sequence: &'a str,
         byte_pos: usize,
-        best: &'a (String, usize),
-        second: &'a (String, usize),
+        best: (&'a str, usize),
+        second: (&'a str, usize),
         skip_spaces: bool,
-    ) -> &'a (String, usize) {
+    ) -> (&'a str, usize) {
         let remaining_after_best = &sequence[byte_pos + best.0.len()..];
         let remaining_after_second = &sequence[byte_pos + second.0.len()..];
 
@@ -65,12 +68,9 @@ impl LiBModel {
             remaining_after_second
         };
 
-        // Build the lookahead window (up to max_len chars) for each choice
-        let window_best: String = lookahead_best.chars().take(self.max_len).collect();
-        let window_second: String = lookahead_second.chars().take(self.max_len).collect();
-
-        let has_next_best = self.trie.match_longest(&window_best, skip_spaces).is_some();
-        let has_next_second = self.trie.match_longest(&window_second, skip_spaces).is_some();
+        // Pass slices directly — match_longest limits the walk to max_len chars internally.
+        let has_next_best = self.trie.match_longest(lookahead_best, self.max_len, skip_spaces).is_some();
+        let has_next_second = self.trie.match_longest(lookahead_second, self.max_len, skip_spaces).is_some();
 
         match (has_next_best, has_next_second) {
             // Both have continuations, or neither does: prefer longest (greedy)
@@ -102,24 +102,23 @@ impl Model for LiBModel {
         let mut byte_pos: usize = 0;
 
         while byte_pos < sequence.len() {
-            // Build window of up to max_len *characters* starting at byte_pos
             let rest = &sequence[byte_pos..];
-            let window: String = rest.chars().take(self.max_len).collect();
-
-            let (best, second) = self.trie.match_two(&window, skip_spaces);
+            // Pass rest directly — match_two limits the walk to max_len chars internally,
+            // so no window String needs to be built.
+            let (best, second) = self.trie.match_two(rest, self.max_len, skip_spaces);
 
             match (best, second) {
                 (Some(b), Some(s)) => {
-                    let chosen = self.choose_best(sequence, byte_pos, &b, &s, skip_spaces);
-                    let tok_str = &chosen.0;
+                    let chosen = self.choose_best(sequence, byte_pos, b, s, skip_spaces);
+                    let tok_str = chosen.0;
                     let tok_id = chosen.1 as u32;
                     let byte_end = byte_pos + tok_str.len();
-                    tokens.push(Token::new(tok_id, tok_str.clone(), (byte_pos, byte_end)));
+                    tokens.push(Token::new(tok_id, tok_str.to_string(), (byte_pos, byte_end)));
                     byte_pos = byte_end;
                 }
                 (Some(b), None) => {
                     let byte_end = byte_pos + b.0.len();
-                    tokens.push(Token::new(b.1 as u32, b.0.clone(), (byte_pos, byte_end)));
+                    tokens.push(Token::new(b.1 as u32, b.0.to_string(), (byte_pos, byte_end)));
                     byte_pos = byte_end;
                 }
                 _ => {
@@ -156,7 +155,7 @@ impl Model for LiBModel {
     }
 
     fn id_to_token(&self, id: u32) -> Option<String> {
-        self.trie.id_to_token(id as usize)
+        self.trie.id_to_token(id as usize).map(str::to_owned)
     }
 
     fn get_vocab(&self) -> HashMap<String, u32> {

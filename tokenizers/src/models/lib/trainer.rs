@@ -156,12 +156,10 @@ impl LiBTrainer {
 
         while byte_pos < sentence.len() {
             let rest = &sentence[byte_pos..];
-            let window: String = rest.chars().take(model.max_len).collect();
-
-            match model.trie.match_longest(&window, false) {
+            match model.trie.match_longest(rest, model.max_len, false) {
                 Some((token, _id)) => {
                     let len = token.len();
-                    chunks.push((token, true));
+                    chunks.push((token.to_string(), true));
                     byte_pos += len;
                 }
                 None => {
@@ -205,8 +203,7 @@ impl LiBTrainer {
                 continue;
             }
 
-            let window: String = rest.chars().take(model.max_len).collect();
-            match model.trie.match_longest(&window, false) {
+            match model.trie.match_longest(rest, model.max_len, false) {
                 Some((token, _)) => {
                     count += 1;
                     byte_pos += token.len();
@@ -329,7 +326,7 @@ impl Trainer for LiBTrainer {
 
             // Memorize: generate and test candidates
             let candidates = Self::generate_candidates(&chunks, self.max_len);
-            let mut rewards: Vec<(String, f64)> = Vec::new();
+            let mut rewards: Vec<(&str, f64)> = Vec::new();
 
             for candidate in &candidates {
                 if model.trie.search(candidate) {
@@ -351,7 +348,7 @@ impl Trainer for LiBTrainer {
                     if reward > 0.0 {
                         model.trie.append(candidate.clone(), self.life);
                     }
-                    rewards.push((candidate.clone(), reward));
+                    rewards.push((candidate.as_str(), reward));
                 }
             }
 
