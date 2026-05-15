@@ -173,11 +173,14 @@ impl LiBTrainer {
     }
 
     /// Generate candidate units from adjacent chunk pairs.
+    ///
+    /// Spaces are prepended (or infixed in supra-word tokens), never
+    /// postpended: any candidate that ends with a space is discarded.
     fn generate_candidates(chunks: &[(String, bool)], max_len: usize) -> Vec<String> {
         let mut candidates = Vec::new();
         for i in 0..chunks.len().saturating_sub(1) {
             let combined = format!("{}{}", chunks[i].0, chunks[i + 1].0);
-            if combined.chars().count() <= max_len {
+            if combined.chars().count() <= max_len && !combined.ends_with(' ') {
                 candidates.push(combined);
             }
         }
@@ -517,5 +520,75 @@ mod tests {
         assert!(trainer.seed.is_none());
         assert!(!trainer.deterministic);
         assert!(trainer.byte_fallback);
+    }
+
+    #[test]
+    fn test_generate_candidates_no_trailing_space() {
+        // Chunks: "the", " ", "cat", " ", "sat"
+        let chunks = vec![
+            ("the".to_string(), true),
+            (" ".to_string(), false),
+            ("cat".to_string(), true),
+            (" ".to_string(), false),
+            ("sat".to_string(), true),
+        ];
+        let candidates = LiBTrainer::generate_candidates(&chunks, 12);
+        for c in &candidates {
+            assert!(
+                !c.ends_with(' '),
+                "Candidate '{}' ends with a space — violates prepend-only convention",
+                c
+            );
+        }
+        // "the " should be absent; " cat" should be present
+        assert!(!candidates.contains(&"the ".to_string()));
+        assert!(candidates.contains(&" cat".to_string()));
+        assert!(!candidates.contains(&"cat ".to_string()));
+        assert!(candidates.contains(&" sat".to_string()));
+    }
+
+    #[test]
+    fn test_generate_candidates_supra_word_infix_ok() {
+        // Supra-word candidates: " cat" + " sat" → " cat sat" — internal space OK, no trailing space
+        let chunks = vec![
+            (" cat".to_string(), true),
+            (" sat".to_string(), true),
+        ];
+        let candidates = LiBTrainer::generate_candidates(&chunks, 12);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], " cat sat");
+        assert!(!candidates[0].ends_with(' '));
+    }
+
+    #[test]
+    fn test_training_produces_no_trailing_space_tokens() {
+        let mut trainer = LiBTrainer::builder()
+            .vocab_size(200)
+            .num_epochs(500)
+            .seed(42)
+            .byte_fallback(false)
+            .build();
+        let corpus = vec![
+            "the cat sat on the mat",
+            "the dog sat on the log",
+            "the cat and the dog",
+        ];
+        let process = |s: &str| -> crate::Result<Vec<String>> {
+            Ok(vec![s.to_string()])
+        };
+        trainer.feed(corpus.into_iter(), process).unwrap();
+        let mut model = LiBModel::default();
+        model.byte_fallback = false;
+        trainer.train(&mut model).unwrap();
+
+        // Standalone " " is a valid fallback seed token; only check multi-char tokens.
+        for (token, _id) in model.get_vocab() {
+            if token.len() == 1 { continue; }
+            assert!(
+                !token.ends_with(' '),
+                "Token '{}' ends with a space — violates prepend-only convention",
+                token
+            );
+        }
     }
 }
