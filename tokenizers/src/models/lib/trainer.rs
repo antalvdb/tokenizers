@@ -18,6 +18,7 @@ pub struct LiBTrainerBuilder {
     memory_in: f64,
     memory_out: f64,
     update_rate: f64,
+    doc_size: usize,
     seed: Option<u64>,
     deterministic: bool,
     byte_fallback: bool,
@@ -29,11 +30,18 @@ impl Default for LiBTrainerBuilder {
         Self {
             vocab_size: 30000,
             num_epochs: 10000,
+            // `life` is the probation period τ₀ (Yang et al. 2020, §2.3.2): how
+            // many document-epochs a tail unit stays on probation before being
+            // forgotten unless re-evaluated good. Paper used 10 (BR-phono) and
+            // 500 (CTB8); retune per corpus with hparam_search.py.
             life: 10,
             max_len: 12,
-            memory_in: 0.25,
-            memory_out: 0.0001,
-            update_rate: 0.2,
+            memory_in: 0.25,   // α: candidate-pair sampling probability
+            memory_out: 0.0001, // ω: fraction of the tail probated per document
+            update_rate: 0.2,  // Δ: ordinal re-ranking rate
+            // A "document" per epoch = this many sentences (the paper's epoch
+            // unit; §2.3.2). Paper documents held ~24–78 sentences.
+            doc_size: 50,
             seed: None,
             deterministic: false,
             byte_fallback: true,
@@ -71,6 +79,10 @@ impl LiBTrainerBuilder {
         self.update_rate = r;
         self
     }
+    pub fn doc_size(mut self, n: usize) -> Self {
+        self.doc_size = n.max(1);
+        self
+    }
     pub fn seed(mut self, s: u64) -> Self {
         self.seed = Some(s);
         self
@@ -96,6 +108,7 @@ impl LiBTrainerBuilder {
             memory_in: self.memory_in,
             memory_out: self.memory_out,
             update_rate: self.update_rate,
+            doc_size: self.doc_size,
             seed: self.seed,
             deterministic: self.deterministic,
             byte_fallback: self.byte_fallback,
@@ -113,14 +126,18 @@ impl LiBTrainerBuilder {
 
 /// LiB trainer: learns a vocabulary using the "Less is Better" algorithm.
 ///
-/// Training follows a cognitively-inspired online learning process:
-/// 1. Initialize vocabulary with characters from the corpus
-/// 2. For each epoch, process a sentence:
-///    - Segment using current vocabulary (reading phase)
-///    - Probabilistically memorize new candidate units
-///    - Test candidates via compression comparison
-///    - Reorder vocabulary based on rewards/punishments
-///    - Prune rarely-used units
+/// Training follows the "Less is Better" process of Yang et al. (2020,
+/// §2.3.1–2.3.2). Each epoch processes one *document* — a batch of `doc_size`
+/// sentences:
+/// 1. Initialize the lexicon with the corpus alphabet (and byte tokens).
+/// 2. For each sentence: segment larger-first with chunk evaluation; memorize
+///    adjacent candidate pairs by sampling with probability α (`memory_in`) and
+///    admitting a pair once it has been sampled at least twice; then apply
+///    active forgetting — re-rank each evaluated chunk by its good/bad verdict
+///    (ordinal move by Δ = `update_rate`), deleting a chunk pushed past |L|.
+/// 3. Once per document: passive forgetting — put the last ω (`memory_out`)
+///    fraction of the lexicon on probation for τ₀ (`life`) epochs, forgetting
+///    units whose probation expires unless they are re-evaluated good.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LiBTrainer {
     pub vocab_size: usize,
@@ -130,6 +147,7 @@ pub struct LiBTrainer {
     pub memory_in: f64,
     pub memory_out: f64,
     pub update_rate: f64,
+    pub doc_size: usize,
     pub seed: Option<u64>,
     pub deterministic: bool,
     pub byte_fallback: bool,
@@ -148,92 +166,149 @@ impl LiBTrainer {
         LiBTrainerBuilder::default()
     }
 
-    /// Segment a sentence using the current model, returning chunks.
-    /// Each chunk is (token_string, is_known).
-    fn segment(model: &LiBModel, sentence: &str) -> Vec<(String, bool)> {
-        let mut chunks = Vec::new();
-        let mut byte_pos = 0;
+    /// Ordinal (lexicon position) of a token; a large value if absent.
+    fn ord(model: &LiBModel, tok: &str) -> i64 {
+        model
+            .trie
+            .token_to_id(tok)
+            .map(|i| i as i64)
+            .unwrap_or(i64::MAX / 2)
+    }
 
-        while byte_pos < sentence.len() {
-            let rest = &sentence[byte_pos..];
-            match model.trie.match_longest(rest, model.max_len, false) {
-                Some((token, _id)) => {
-                    let len = token.len();
-                    chunks.push((token.to_string(), true));
-                    byte_pos += len;
+    /// Evaluate whether the longest chunk `c1` is redundant relative to the
+    /// second-longest `c2nd` at `pos` (Yang et al. 2020, §2.3.1;
+    /// `model.py::dropout`). Greedily extend both branches until they re-converge,
+    /// counting chunks, unknown symbols, and ordinal sums. `c1` is *bad* if its
+    /// branch has more unknowns, or (equal unknowns) more chunks, or (equal both)
+    /// a higher ordinal sum. Returns true when `c1` is bad.
+    fn eval_chunk(model: &LiBModel, sent: &str, pos: usize, c1: &str, c2nd: &str) -> bool {
+        let (mut p0, mut nc0, mut nu0, mut ord0) =
+            (pos + c1.len(), 1i64, 0i64, Self::ord(model, c1));
+        let (mut p1, mut nc1, mut nu1, mut ord1) =
+            (pos + c2nd.len(), 1i64, 0i64, Self::ord(model, c2nd));
+        let mut guard = 0;
+        while p0 != p1 && guard < 4096 {
+            guard += 1;
+            if p1 < p0 {
+                let rest = &sent[p1..];
+                match model.trie.match_longest(rest, model.max_len, false) {
+                    Some((t, id)) => { p1 += t.len(); nc1 += 1; ord1 += id as i64; }
+                    None => { p1 += rest.chars().next().unwrap().len_utf8(); nu1 += 1; nc1 += 1; }
+                }
+            } else {
+                let rest = &sent[p0..];
+                match model.trie.match_longest(rest, model.max_len, false) {
+                    Some((t, id)) => { p0 += t.len(); nc0 += 1; ord0 += id as i64; }
+                    None => { p0 += rest.chars().next().unwrap().len_utf8(); nu0 += 1; nc0 += 1; }
+                }
+            }
+        }
+        let redundant = nu0 == nu1 && (nc0 > nc1 || (nc0 == nc1 && ord0 > ord1));
+        nu0 > nu1 || redundant
+    }
+
+    /// `c1` with its last character removed (UTF-8 safe).
+    fn drop_last_char(s: &str) -> String {
+        let mut chars: Vec<char> = s.chars().collect();
+        chars.pop();
+        chars.into_iter().collect()
+    }
+
+    /// Read one sentence (`model.py::reading` inner loop): greedy larger-first
+    /// segmentation that always takes the longest match, memorizes adjacent
+    /// candidate pairs (α-sampled, admitted on the second sighting within the
+    /// document), records good/bad evaluations into `reward_list`, and cancels a
+    /// used/good chunk's probation.
+    #[allow(clippy::too_many_arguments)]
+    fn read_sentence(
+        model: &mut LiBModel,
+        sent: &str,
+        reward_list: &mut Vec<(String, i32)>,
+        to_memorize: &mut HashSet<String>,
+        to_dropout: &mut HashMap<String, i32>,
+        rng: &mut Box<dyn RngCore>,
+        alpha: f64,
+        mini_gap: usize,
+        vocab_size: usize,
+    ) {
+        let max_len = model.max_len;
+        let mut last_chunk = String::new();
+        let mut last_known = false;
+        let mut pos = 0usize;
+        while pos < sent.len() {
+            let rest = &sent[pos..];
+            let (best, second) = model.trie.match_two(rest, max_len, false);
+            match best {
+                Some((c1_ref, _)) => {
+                    let c1 = c1_ref.to_string();
+                    let c1_len_chars = c1.chars().count();
+
+                    // Memorize: α-sample, admit on the second sighting.
+                    if 2 + c1_len_chars <= max_len && rng.random::<f64>() < alpha {
+                        let to_get = if !last_known {
+                            let ll = last_chunk.chars().count();
+                            if ll > 0 && ll <= mini_gap { Some(last_chunk.clone()) } else { None }
+                        } else if last_chunk.chars().count() + c1_len_chars <= max_len {
+                            Some(format!("{last_chunk}{c1}"))
+                        } else {
+                            None
+                        };
+                        if let Some(g) = to_get {
+                            // Prepend-only space convention: a token may start
+                            // with a space but never end with one (the reference
+                            // trains on space-stripped text; our HF metaspace
+                            // setup keeps spaces, so filter trailing spaces here).
+                            if !g.is_empty() && !g.ends_with(' ') && !model.trie.search(&g) {
+                                if to_memorize.remove(&g) {
+                                    if model.trie.len() < vocab_size {
+                                        model.trie.append(g, 0);
+                                    }
+                                } else {
+                                    to_memorize.insert(g);
+                                }
+                            }
+                        }
+                    }
+
+                    // Evaluate (if there is a shorter alternative) or cancel probation.
+                    let c2nd = second.map(|(s, _)| s).filter(|s| !s.is_empty());
+                    if c1_len_chars > 1 && c2nd.is_some() {
+                        let c2nd = c2nd.unwrap();
+                        if Self::eval_chunk(model, sent, pos, &c1, c2nd) {
+                            reward_list.push((c1.clone(), 1)); // bad -> demote
+                            let trimmed = Self::drop_last_char(&c1);
+                            if !trimmed.is_empty() {
+                                if let Some((sm, _)) =
+                                    model.trie.match_longest(&trimmed, max_len, false)
+                                {
+                                    reward_list.push((sm.to_string(), -1));
+                                }
+                            }
+                        } else {
+                            reward_list.push((c1.clone(), -1)); // good -> promote
+                            to_dropout.remove(&c1);
+                        }
+                    } else {
+                        to_dropout.remove(&c1);
+                    }
+
+                    pos += c1.len();
+                    last_chunk = c1;
+                    last_known = true;
                 }
                 None => {
                     let ch = rest.chars().next().unwrap();
-                    chunks.push((ch.to_string(), false));
-                    byte_pos += ch.len_utf8();
+                    if last_known {
+                        last_chunk.clear();
+                        last_known = false;
+                    }
+                    last_chunk.push(ch);
+                    pos += ch.len_utf8();
                 }
             }
         }
-        chunks
     }
 
-    /// Generate candidate units from adjacent chunk pairs.
-    ///
-    /// Spaces are prepended (or infixed in supra-word tokens), never
-    /// postpended: any candidate that ends with a space is discarded.
-    fn generate_candidates(chunks: &[(String, bool)], max_len: usize) -> Vec<String> {
-        let mut candidates = Vec::new();
-        for i in 0..chunks.len().saturating_sub(1) {
-            let combined = format!("{}{}", chunks[i].0, chunks[i + 1].0);
-            if combined.chars().count() <= max_len && !combined.ends_with(' ') {
-                candidates.push(combined);
-            }
-        }
-        candidates
-    }
-
-    /// Segment a sentence but also greedily match a given candidate token.
-    fn segment_with_candidate(
-        model: &LiBModel,
-        candidate: &str,
-        sentence: &str,
-    ) -> usize {
-        let mut count = 0usize;
-        let mut byte_pos = 0;
-
-        while byte_pos < sentence.len() {
-            let rest = &sentence[byte_pos..];
-
-            // Try the candidate first
-            if rest.starts_with(candidate) {
-                count += 1;
-                byte_pos += candidate.len();
-                continue;
-            }
-
-            match model.trie.match_longest(rest, model.max_len, false) {
-                Some((token, _)) => {
-                    count += 1;
-                    byte_pos += token.len();
-                }
-                None => {
-                    count += 1;
-                    byte_pos += rest.chars().next().unwrap().len_utf8();
-                }
-            }
-        }
-        count
-    }
-
-    /// Test a candidate: does adding it reduce the chunk count?
-    /// Returns +1.0 (improvement), -1.0 (worse), 0.0 (neutral).
-    fn test_candidate(model: &LiBModel, candidate: &str, sentence: &str) -> f64 {
-        let n_without = Self::segment(model, sentence).len();
-        let n_with = Self::segment_with_candidate(model, candidate, sentence);
-
-        if n_with < n_without {
-            1.0
-        } else if n_with > n_without {
-            -1.0
-        } else {
-            0.0
-        }
-    }
 }
 
 impl Default for LiBTrainer {
@@ -259,7 +334,7 @@ impl Trainer for LiBTrainer {
             for b in 0..=255u8 {
                 let code = format!("<{b:#04X}>");
                 if !model.trie.search(&code) {
-                    model.trie.append(code, self.life);
+                    model.trie.append(code, 0);
                 }
             }
             // Add Latin/ASCII characters from the corpus
@@ -271,7 +346,7 @@ impl Trainer for LiBTrainer {
             for ch in &chars {
                 let s = ch.to_string();
                 if !model.trie.search(&s) {
-                    model.trie.append(s, self.life);
+                    model.trie.append(s, 0);
                 }
             }
         } else {
@@ -281,7 +356,7 @@ impl Trainer for LiBTrainer {
             for ch in &chars {
                 let s = ch.to_string();
                 if !model.trie.search(&s) {
-                    model.trie.append(s, self.life);
+                    model.trie.append(s, 0);
                 }
             }
         }
@@ -310,58 +385,63 @@ impl Trainer for LiBTrainer {
             None
         };
 
-        for epoch in 0..self.num_epochs {
-            if model.trie.len() >= self.vocab_size {
-                break;
+        // Probation watch (`model.py::to_dropout`): chunk -> remaining life.
+        // Seeded units start watched, like the reference `init`.
+        let mut to_dropout: HashMap<String, i32> = HashMap::new();
+        for i in 0..model.trie.len() {
+            if let Some(t) = model.trie.id_to_token(i) {
+                to_dropout.insert(t.to_string(), self.life);
             }
+        }
+        let mini_gap = 2usize;
 
+        for epoch in 0..self.num_epochs {
             let vocab_before = model.trie.len();
 
-            // Sample a sentence
-            let sentence = if self.deterministic {
-                &sentences[epoch % sentences.len()]
-            } else {
-                &sentences[rng.random_range(0..sentences.len())]
-            };
-
-            // Read: segment with current vocabulary
-            let chunks = Self::segment(model, sentence);
-
-            // Memorize: generate and test candidates
-            let candidates = Self::generate_candidates(&chunks, self.max_len);
-            let mut rewards: Vec<(&str, f64)> = Vec::new();
-
-            for candidate in &candidates {
-                if model.trie.search(candidate) {
-                    continue;
-                }
-                if model.trie.len() >= self.vocab_size {
-                    break;
-                }
-
-                let should_consider = if self.deterministic {
-                    true
+            // An epoch reads one document = `doc_size` sentences, accumulating a
+            // single reward_list and a per-document memorize set (the twice-rule).
+            let mut reward_list: Vec<(String, i32)> = Vec::new();
+            let mut to_memorize: HashSet<String> = HashSet::new();
+            for k in 0..self.doc_size {
+                let sentence = if self.deterministic {
+                    &sentences[(epoch * self.doc_size + k) % sentences.len()]
                 } else {
-                    rng.random::<f64>() < self.memory_in
+                    &sentences[rng.random_range(0..sentences.len())]
                 };
+                Self::read_sentence(
+                    model, sentence, &mut reward_list, &mut to_memorize,
+                    &mut to_dropout, &mut rng, self.memory_in, mini_gap, self.vocab_size,
+                );
+            }
 
-                if should_consider {
-                    let reward = Self::test_candidate(model, candidate, sentence);
+            // batch_update_memory: decrement the probation watch and forget the
+            // expired; batch-apply the ordinal re-ranking once; then re-arm the
+            // tail ω-fraction onto the watch.
+            let mut to_del: HashSet<String> = HashSet::new();
+            to_dropout.retain(|chunk, life| {
+                if *life <= 1 {
+                    to_del.insert(chunk.clone());
+                    false
+                } else {
+                    *life -= 1;
+                    true
+                }
+            });
+            model.trie.group_remove(&to_del);
 
-                    if reward > 0.0 {
-                        model.trie.append(candidate.clone(), self.life);
-                    }
-                    rewards.push((candidate.as_str(), reward));
+            let rewards: Vec<(String, i32)> =
+                reward_list.into_iter().filter(|(w, _)| !to_del.contains(w)).collect();
+            for r in model.trie.group_move(&rewards, self.update_rate) {
+                to_dropout.remove(&r);
+            }
+
+            let n = model.trie.len();
+            let start = ((1.0 - self.memory_out) * n as f64) as usize;
+            for ind in start..n {
+                if let Some(t) = model.trie.id_to_token(ind) {
+                    to_dropout.entry(t.to_string()).or_insert(self.life);
                 }
             }
-
-            // Update: reorder vocabulary based on rewards
-            if !rewards.is_empty() {
-                model.trie.batch_update(&rewards, self.update_rate);
-            }
-
-            // Prune: remove bottom fraction
-            model.trie.prune(self.memory_out);
 
             let vocab_after = model.trie.len();
             let delta = vocab_after as i64 - vocab_before as i64;
@@ -374,6 +454,10 @@ impl Trainer for LiBTrainer {
                 ));
             }
         }
+
+        // Re-ranking skipped trie rebuilds on pure reorders for speed, so the
+        // trie's ordinal ids may be stale; sync once before returning.
+        model.trie.sync();
 
         if let Some(ref p) = progress {
             p.set_message(format!("Vocab: {} tokens", model.trie.len()));
@@ -520,44 +604,6 @@ mod tests {
         assert!(trainer.seed.is_none());
         assert!(!trainer.deterministic);
         assert!(trainer.byte_fallback);
-    }
-
-    #[test]
-    fn test_generate_candidates_no_trailing_space() {
-        // Chunks: "the", " ", "cat", " ", "sat"
-        let chunks = vec![
-            ("the".to_string(), true),
-            (" ".to_string(), false),
-            ("cat".to_string(), true),
-            (" ".to_string(), false),
-            ("sat".to_string(), true),
-        ];
-        let candidates = LiBTrainer::generate_candidates(&chunks, 12);
-        for c in &candidates {
-            assert!(
-                !c.ends_with(' '),
-                "Candidate '{}' ends with a space — violates prepend-only convention",
-                c
-            );
-        }
-        // "the " should be absent; " cat" should be present
-        assert!(!candidates.contains(&"the ".to_string()));
-        assert!(candidates.contains(&" cat".to_string()));
-        assert!(!candidates.contains(&"cat ".to_string()));
-        assert!(candidates.contains(&" sat".to_string()));
-    }
-
-    #[test]
-    fn test_generate_candidates_supra_word_infix_ok() {
-        // Supra-word candidates: " cat" + " sat" → " cat sat" — internal space OK, no trailing space
-        let chunks = vec![
-            (" cat".to_string(), true),
-            (" sat".to_string(), true),
-        ];
-        let candidates = LiBTrainer::generate_candidates(&chunks, 12);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0], " cat sat");
-        assert!(!candidates[0].ends_with(' '));
     }
 
     #[test]

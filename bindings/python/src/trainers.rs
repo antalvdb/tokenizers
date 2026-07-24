@@ -899,15 +899,21 @@ impl PyUnigramTrainer {
 ///     num_epochs (:obj:`int`):
 ///         Number of training epochs. Default: 10000.
 ///     life (:obj:`int`):
-///         Initial life counter for new vocabulary units. Default: 10.
+///         Probation period τ₀ (passive forgetting): documents a tail unit may
+///         go unused before it is forgotten. Default: 10.
 ///     max_len (:obj:`int`):
 ///         Maximum token length in characters. Default: 12.
 ///     memory_in (:obj:`float`):
 ///         Probability of memorizing a candidate (stochastic mode). Default: 0.25.
 ///     memory_out (:obj:`float`):
-///         Fraction of low-priority units to prune per epoch. Default: 0.0001.
+///         Forgetting ratio ω: fraction of the tail placed on probation per
+///         document. Default: 0.0001.
 ///     update_rate (:obj:`float`):
-///         How far units move on reward/punishment. Default: 0.2.
+///         Ordinal re-ranking rate Δ (active forgetting): sets the
+///         promotion/demotion step ⌊ΘΔ⌋+1. Default: 0.2.
+///     doc_size (:obj:`int`):
+///         Sentences per document (one epoch). Rewards accumulate over the
+///         document before one re-ranking + forgetting step. Default: 50.
 ///     seed (:obj:`int`, `optional`):
 ///         Random seed for reproducibility.
 ///     deterministic (:obj:`bool`):
@@ -992,6 +998,16 @@ impl PyLiBTrainer {
     }
 
     #[getter]
+    fn get_doc_size(self_: PyRef<Self>) -> usize {
+        getter!(self_, LiBTrainer, doc_size)
+    }
+
+    #[setter]
+    fn set_doc_size(self_: PyRef<Self>, doc_size: usize) {
+        setter!(self_, LiBTrainer, doc_size, doc_size);
+    }
+
+    #[getter]
     fn get_byte_fallback(self_: PyRef<Self>) -> bool {
         getter!(self_, LiBTrainer, byte_fallback)
     }
@@ -1041,7 +1057,7 @@ impl PyLiBTrainer {
     #[new]
     #[pyo3(
         signature = (**kwargs),
-        text_signature = "(self, vocab_size=30000, num_epochs=10000, life=10, max_len=12, memory_in=0.25, memory_out=0.0001, update_rate=0.2, seed=None, deterministic=False, byte_fallback=True, special_tokens=[])"
+        text_signature = "(self, vocab_size=30000, num_epochs=10000, life=10, max_len=12, memory_in=0.25, memory_out=0.0001, update_rate=0.2, doc_size=50, seed=None, deterministic=False, byte_fallback=True, special_tokens=[])"
     )]
     fn new(kwargs: Option<Bound<'_, PyDict>>) -> PyResult<(Self, PyTrainer)> {
         let mut builder = LiBTrainer::builder();
@@ -1056,6 +1072,7 @@ impl PyLiBTrainer {
                     "memory_in" => { builder = builder.memory_in(val.extract()?); }
                     "memory_out" => { builder = builder.memory_out(val.extract()?); }
                     "update_rate" => { builder = builder.update_rate(val.extract()?); }
+                    "doc_size" => { builder = builder.doc_size(val.extract()?); }
                     "seed" => { builder = builder.seed(val.extract()?); }
                     "deterministic" => { builder = builder.deterministic(val.extract()?); }
                     "byte_fallback" => { builder = builder.byte_fallback(val.extract()?); }

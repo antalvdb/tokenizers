@@ -277,6 +277,108 @@ impl TrieList {
         removed
     }
 
+    /// Active forgetting via ordinal re-ranking (Yang et al. 2020, §2.3.2).
+    /// Importance is the unit's ordinal position (0 = head). For each evaluated
+    /// chunk `(token, good)`: a *good* chunk moves toward the head,
+    /// `Θ ← ⌊Θ(1−Δ)⌋`, and has any probation cancelled; a *bad* chunk moves
+    /// toward the tail, `Θ ← ⌊Θ(1+Δ)⌋`, and is **deleted if `Θ > |L|`**. Atomic
+    /// units are never deleted (they are moved to the tail instead) so the
+    /// alphabet stays complete. Returns the tokens deleted.
+    /// Batched ordinal re-ranking = active forgetting (Yang et al. 2020, §2.3.2;
+    /// `structures.py::group_move`). Applied once per document with all rewards.
+    /// Reward `e`: `-1` (good) moves the unit headward by `step = ⌊Θ·Δ⌋+1`;
+    /// `+1` (bad) moves it tailward by the same step, and if that pushes it past
+    /// the tail (`Θ+step ≥ |L|`) the unit is **deleted**. The head unit (Θ=0)
+    /// never moves. Atomic units are never deleted. Returns deleted tokens.
+    pub fn group_move(&mut self, rewards: &[(String, i32)], update_rate: f64) -> Vec<String> {
+        let mut removed = Vec::new();
+        for (w, e) in rewards {
+            let cur = match self.token_to_index.get(w.as_str()) {
+                Some(&i) => i,
+                None => continue,
+            };
+            if cur == 0 {
+                continue;
+            }
+            let step = (cur as f64 * update_rate) as usize + 1;
+            if *e < 0 {
+                let dest = cur.saturating_sub(step);
+                if dest != cur {
+                    let en = self.vocab.remove(cur);
+                    self.vocab.insert(dest, en);
+                    self.reindex_range(dest, cur);
+                }
+            } else if *e > 0 {
+                let dest = cur + step;
+                if dest >= self.vocab.len() && !Self::is_atomic(w) {
+                    let en = self.vocab.remove(cur); // Θ > |L| -> forget
+                    self.token_to_index.remove(en.token.as_str());
+                    self.reindex_range(cur, self.vocab.len().saturating_sub(1));
+                    removed.push(en.token);
+                } else {
+                    let d = dest.min(self.vocab.len() - 1);
+                    if d != cur {
+                        let en = self.vocab.remove(cur);
+                        self.vocab.insert(d, en);
+                        self.reindex_range(cur, d);
+                    }
+                }
+            }
+        }
+        // Pure reorders leave the trie's token *set* unchanged; only deletions
+        // require a trie rebuild (ordinal ids otherwise lag until `sync()`).
+        if !removed.is_empty() {
+            self.rebuild_trie();
+        }
+        removed
+    }
+
+    /// Batch-remove tokens (passive forgetting's expired probation; the tail
+    /// deletion of `structures.py::group_remove`). Atomic units are kept.
+    pub fn group_remove(&mut self, tokens: &std::collections::HashSet<String>) {
+        if tokens.is_empty() {
+            return;
+        }
+        let before = self.vocab.len();
+        self.vocab
+            .retain(|e| !tokens.contains(&e.token) || Self::is_atomic(&e.token));
+        if self.vocab.len() != before {
+            self.rebuild_indices();
+            self.rebuild_trie();
+        }
+    }
+
+    /// Update `token_to_index` for the vocab positions in `[lo, hi]` only —
+    /// the span affected by a single ordinal move — instead of rebuilding the
+    /// whole index. Keeps re-ranking cheap on a large lexicon.
+    fn reindex_range(&mut self, lo: usize, hi: usize) {
+        if self.vocab.is_empty() {
+            return;
+        }
+        let end = hi.min(self.vocab.len() - 1);
+        for i in lo..=end {
+            // Membership is unchanged by a reorder, so the key already exists:
+            // update its index in place, avoiding a String allocation per entry.
+            if let Some(slot) = self.token_to_index.get_mut(self.vocab[i].token.as_str()) {
+                *slot = i;
+            }
+        }
+    }
+
+    /// Rebuild the reverse index and trie from the current vocab order. Call
+    /// once after training, since `rerank_by_eval` skips trie rebuilds on pure
+    /// reorders to stay fast, leaving the trie's ordinal ids stale.
+    pub fn sync(&mut self) {
+        self.rebuild_indices();
+        self.rebuild_trie();
+    }
+
+    /// Atomic units form the irreducible alphabet and are never forgotten:
+    /// single characters and byte-fallback tokens (`<0x..>`).
+    fn is_atomic(token: &str) -> bool {
+        token.chars().count() <= 1 || (token.starts_with("<0x") && token.ends_with('>'))
+    }
+
     // -- internal helpers ---------------------------------------------------
 
     /// Insert a single token into the trie (does NOT touch vocab/token_to_index).
@@ -498,6 +600,39 @@ mod tests {
         for i in 0..95 {
             assert!(tl.search(&format!("tok_{}", i)));
         }
+    }
+
+    #[test]
+    fn test_group_move() {
+        let mut tl = TrieList::new();
+        for i in 0..10 {
+            tl.append(format!("u{i}"), 0);
+        }
+        // "u9" (tail) rewarded good (-1) -> moves toward the head.
+        let before = tl.token_to_id("u9").unwrap();
+        tl.group_move(&[("u9".to_string(), -1)], 0.5);
+        assert!(tl.token_to_id("u9").unwrap() < before, "good unit moves headward");
+
+        // "u1" punished (+1) repeatedly -> pushed past |L| and deleted.
+        for _ in 0..30 {
+            tl.group_move(&[("u1".to_string(), 1)], 0.9);
+        }
+        assert!(!tl.search("u1"), "a repeatedly-bad unit is eventually forgotten");
+    }
+
+    #[test]
+    fn test_group_remove() {
+        use std::collections::HashSet;
+        let mut tl = TrieList::new();
+        tl.append("a".to_string(), 0); // atomic
+        tl.append("keep me".to_string(), 0);
+        tl.append("drop me".to_string(), 0);
+        let del: HashSet<String> =
+            vec!["drop me".to_string(), "a".to_string()].into_iter().collect();
+        tl.group_remove(&del);
+        assert!(!tl.search("drop me"), "listed multi-char unit is removed");
+        assert!(tl.search("keep me"), "unlisted unit stays");
+        assert!(tl.search("a"), "atomic unit is never removed");
     }
 
     // 10. test_remove_tokens
