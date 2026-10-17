@@ -68,9 +68,9 @@ impl LiBModel {
             remaining_after_second
         };
 
-        // Pass slices directly — match_longest limits the walk to max_len chars internally.
-        let has_next_best = self.trie.match_longest(lookahead_best, self.max_len, skip_spaces).is_some();
-        let has_next_second = self.trie.match_longest(lookahead_second, self.max_len, skip_spaces).is_some();
+        // Only existence matters here, so stop at the first token found.
+        let has_next_best = self.trie.has_match(lookahead_best, self.max_len, skip_spaces);
+        let has_next_second = self.trie.has_match(lookahead_second, self.max_len, skip_spaces);
 
         match (has_next_best, has_next_second) {
             // Both have continuations, or neither does: prefer longest (greedy)

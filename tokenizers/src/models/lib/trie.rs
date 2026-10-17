@@ -180,6 +180,28 @@ impl TrieList {
         best
     }
 
+    /// Whether any token is a prefix of `input`, under the same `max_len` and
+    /// `skip_spaces` rules as `match_longest`. Returns at the first token
+    /// found, so it usually walks a single character.
+    pub fn has_match(&self, input: &str, max_len: usize, skip_spaces: bool) -> bool {
+        let mut node_idx: usize = 0;
+        for (char_count, ch) in input.chars().enumerate() {
+            if char_count >= max_len || (skip_spaces && ch == ' ') {
+                return false;
+            }
+            match self.nodes[node_idx].children.get(&ch) {
+                Some(&next) => {
+                    node_idx = next;
+                    if self.nodes[node_idx].token_index.is_some() {
+                        return true;
+                    }
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// Return the longest AND second-longest prefix matches.
     /// The first element is the longest, the second is the second-longest.
     /// Both are slices into `input`; `(&str, usize)` is Copy so no clone is needed.
@@ -778,6 +800,25 @@ mod tests {
 
         let result = tl.match_longest("xyz", 12, true);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_has_match_agrees_with_match_longest() {
+        let mut tl = TrieList::new();
+        for t in ["the", "the cat", " cat", "c", "ca", "x y"] {
+            tl.append(t.to_string(), 1);
+        }
+        for input in ["the cat sat", " cat", "cat", "x y", "x", "", "zzz", "th"] {
+            for skip in [false, true] {
+                for max_len in [1, 2, 12] {
+                    assert_eq!(
+                        tl.has_match(input, max_len, skip),
+                        tl.match_longest(input, max_len, skip).is_some(),
+                        "input {input:?} skip {skip} max_len {max_len}"
+                    );
+                }
+            }
+        }
     }
 
     // test_match_two_skip_spaces
