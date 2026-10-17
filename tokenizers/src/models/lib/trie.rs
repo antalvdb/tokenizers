@@ -1,5 +1,29 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+// TEMPORARY verification switch: when true, matches report the ordinal a
+// token had at the last full rebuild, reproducing the old trie's stale ids.
+const STALE_COMPAT: bool = true;
+
+/// Position value of a handle whose unit has been forgotten.
+const DELETED: u32 = u32::MAX;
+
+// ---------------------------------------------------------------------------
+// Handle -- stable identity of a vocabulary entry
+// ---------------------------------------------------------------------------
+
+/// A unit's token id is its position in the priority order, which changes on
+/// every re-ranking. A handle does not, so the trie and the reverse map store
+/// handles and stay valid across reorders; a reorder only rewrites `pos_of`
+/// for the moved span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct Handle(u32);
+
+impl Handle {
+    fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TrieNode -- internal node of the array-based trie
@@ -8,7 +32,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct TrieNode {
     children: HashMap<char, usize>, // char -> node index in TrieList.nodes
-    token_index: Option<usize>,     // Some(id) if this node terminates a token
+    handle: Option<Handle>,         // Some(h) if this node terminates a live token
 }
 
 // ---------------------------------------------------------------------------
@@ -26,22 +50,26 @@ pub struct VocabEntry {
 // TrieList -- hybrid trie + priority-ordered list
 // ---------------------------------------------------------------------------
 
+/// Forgotten units leave their handle and trie nodes behind until `sync()`,
+/// which compacts everything so that handles equal positions again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrieList {
-    nodes: Vec<TrieNode>,                   // array-based trie, index 0 = root
-    vocab: Vec<VocabEntry>,                 // priority-ordered vocabulary, index = token ID
-    token_to_index: HashMap<String, usize>, // reverse lookup: token string -> vocab index
+    nodes: Vec<TrieNode>,                     // array-based trie, index 0 = root
+    entries: Vec<VocabEntry>,                 // indexed by handle
+    order: Vec<Handle>,                       // priority order: position (= token id) -> handle
+    pos_of: Vec<u32>,                         // handle -> position, DELETED if forgotten
+    trie_pos: Vec<u32>,                       // STALE_COMPAT only: position at last rebuild
+    token_to_handle: HashMap<String, Handle>, // reverse lookup for live tokens
 }
 
 // PartialEq compares only the vocab ordering (not internal trie structure).
 impl PartialEq for TrieList {
     fn eq(&self, other: &Self) -> bool {
-        self.vocab.len() == other.vocab.len()
+        self.len() == other.len()
             && self
-                .vocab
                 .iter()
-                .zip(other.vocab.iter())
-                .all(|(a, b)| a.token == b.token)
+                .zip(other.iter())
+                .all(|((_, a), (_, b))| a.token == b.token)
     }
 }
 
@@ -58,8 +86,11 @@ impl TrieList {
     pub fn new() -> Self {
         Self {
             nodes: vec![TrieNode::default()], // index 0 = root
-            vocab: Vec::new(),
-            token_to_index: HashMap::new(),
+            entries: Vec::new(),
+            order: Vec::new(),
+            pos_of: Vec::new(),
+            trie_pos: Vec::new(),
+            token_to_handle: HashMap::new(),
         }
     }
 
@@ -67,95 +98,106 @@ impl TrieList {
 
     /// Number of tokens in the vocabulary.
     pub fn len(&self) -> usize {
-        self.vocab.len()
+        self.order.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.vocab.is_empty()
+        self.order.is_empty()
     }
 
     // -- insertion ----------------------------------------------------------
 
     /// Append a token at the end of the vocab (lowest priority).
     pub fn append(&mut self, token: String, life: i32) {
-        if self.token_to_index.contains_key(&token) {
+        if self.token_to_handle.contains_key(&token) {
             return; // no duplicates
         }
-        let id = self.vocab.len();
-        // trie_insert borrows &str, so do it before the move into token_to_index/vocab.
-        // This saves one clone vs. cloning token into both VocabEntry and token_to_index.
-        self.trie_insert(&token, id);
-        self.token_to_index.insert(token.clone(), id);
-        self.vocab.push(VocabEntry { token, life, frequency: 0 });
+        let h = Handle(self.entries.len() as u32);
+        let pos = self.order.len() as u32;
+        // trie_insert borrows &str, so do it before the move into the map/entries.
+        self.trie_insert(&token, h);
+        self.token_to_handle.insert(token.clone(), h);
+        self.entries.push(VocabEntry { token, life, frequency: 0 });
+        self.order.push(h);
+        self.pos_of.push(pos);
+        self.trie_pos.push(pos);
     }
 
     /// Insert a token at position `pos`, shifting subsequent items.
     pub fn insert_at(&mut self, pos: usize, token: String, life: i32) {
-        if self.token_to_index.contains_key(&token) {
+        if self.token_to_handle.contains_key(&token) {
             return; // no duplicates
         }
-        let pos = pos.min(self.vocab.len()); // clamp
-        self.vocab.insert(
-            pos,
-            VocabEntry {
-                token: token.clone(),
-                life,
-                frequency: 0,
-            },
-        );
-        self.rebuild_indices();
-        self.rebuild_trie();
+        let pos = pos.min(self.len()); // clamp
+        self.append(token, life);
+        let last = self.len() - 1;
+        self.order[pos..=last].rotate_right(1);
+        self.reindex_range(pos, last);
+        self.snapshot_trie_pos();
     }
 
     // -- lookups ------------------------------------------------------------
 
     /// Check whether a token exists in the vocabulary.
     pub fn search(&self, token: &str) -> bool {
-        self.token_to_index.contains_key(token)
+        self.token_to_handle.contains_key(token)
     }
 
     /// Return the vocabulary index (= token ID) for a given string.
     pub fn token_to_id(&self, token: &str) -> Option<usize> {
-        self.token_to_index.get(token).copied()
+        self.token_to_handle
+            .get(token)
+            .map(|h| self.pos_of[h.idx()] as usize)
     }
 
     /// Return the token string for a given ID.
     pub fn id_to_token(&self, id: usize) -> Option<&str> {
-        self.vocab.get(id).map(|e| e.token.as_str())
+        self.get_entry(id).map(|e| e.token.as_str())
     }
 
     /// Get an immutable reference to a vocab entry by ID.
     pub fn get_entry(&self, id: usize) -> Option<&VocabEntry> {
-        self.vocab.get(id)
+        self.order.get(id).map(|h| &self.entries[h.idx()])
     }
 
     /// Get a mutable reference to a vocab entry by ID.
     pub fn get_entry_mut(&mut self, id: usize) -> Option<&mut VocabEntry> {
-        self.vocab.get_mut(id)
+        let h = *self.order.get(id)?;
+        self.entries.get_mut(h.idx())
     }
 
     /// Build a HashMap<String, u32> suitable for the Model trait's `get_vocab`.
     pub fn get_vocab_map(&self) -> HashMap<String, u32> {
-        self.vocab
-            .iter()
-            .enumerate()
+        self.iter()
             .map(|(i, e)| (e.token.clone(), i as u32))
             .collect()
     }
 
-    /// Iterate over (id, &VocabEntry) pairs.
+    /// Iterate over (id, &VocabEntry) pairs in priority order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &VocabEntry)> {
-        self.vocab.iter().enumerate()
+        self.order
+            .iter()
+            .enumerate()
+            .map(move |(i, h)| (i, &self.entries[h.idx()]))
     }
 
     // -- matching -----------------------------------------------------------
+
+    /// Token id reported for a trie match.
+    fn match_id(&self, h: Handle) -> usize {
+        if STALE_COMPAT {
+            self.trie_pos[h.idx()] as usize
+        } else {
+            self.pos_of[h.idx()] as usize
+        }
+    }
 
     /// Longest-prefix match: walk the trie from the start of `input`,
     /// returning a slice of `input` for the longest matching token and its ID.
     /// The walk stops after `max_len` characters (matching the training constraint).
     pub fn match_longest<'a>(&self, input: &'a str, max_len: usize, skip_spaces: bool) -> Option<(&'a str, usize)> {
         let mut node_idx: usize = 0;
-        let mut best: Option<(&'a str, usize)> = None;
+        let mut best: Option<(usize, Handle)> = None;
         let mut byte_end: usize = 0;
         let mut char_count: usize = 0;
         let mut has_space = false;
@@ -168,16 +210,16 @@ impl TrieList {
                     byte_end += ch.len_utf8();
                     char_count += 1;
                     if ch == ' ' { has_space = true; }
-                    if let Some(tok_id) = self.nodes[node_idx].token_index {
+                    if let Some(h) = self.nodes[node_idx].handle {
                         if !skip_spaces || !has_space {
-                            best = Some((&input[..byte_end], tok_id));
+                            best = Some((byte_end, h));
                         }
                     }
                 }
                 None => break,
             }
         }
-        best
+        best.map(|(end, h)| (&input[..end], self.match_id(h)))
     }
 
     /// Whether any token is a prefix of `input`, under the same `max_len` and
@@ -192,7 +234,7 @@ impl TrieList {
             match self.nodes[node_idx].children.get(&ch) {
                 Some(&next) => {
                     node_idx = next;
-                    if self.nodes[node_idx].token_index.is_some() {
+                    if self.nodes[node_idx].handle.is_some() {
                         return true;
                     }
                 }
@@ -212,8 +254,8 @@ impl TrieList {
         skip_spaces: bool,
     ) -> (Option<(&'a str, usize)>, Option<(&'a str, usize)>) {
         let mut node_idx: usize = 0;
-        let mut best: Option<(&'a str, usize)> = None;
-        let mut second: Option<(&'a str, usize)> = None;
+        let mut best: Option<(usize, Handle)> = None;
+        let mut second: Option<(usize, Handle)> = None;
         let mut byte_end: usize = 0;
         let mut char_count: usize = 0;
         let mut has_space = false;
@@ -226,17 +268,18 @@ impl TrieList {
                     byte_end += ch.len_utf8();
                     char_count += 1;
                     if ch == ' ' { has_space = true; }
-                    if let Some(tok_id) = self.nodes[node_idx].token_index {
+                    if let Some(h) = self.nodes[node_idx].handle {
                         if !skip_spaces || !has_space {
-                            second = best; // Copy — no clone
-                            best = Some((&input[..byte_end], tok_id));
+                            second = best;
+                            best = Some((byte_end, h));
                         }
                     }
                 }
                 None => break,
             }
         }
-        (best, second)
+        let resolve = |m: Option<(usize, Handle)>| m.map(|(end, h)| (&input[..end], self.match_id(h)));
+        (resolve(best), resolve(second))
     }
 
     // -- reordering / pruning -----------------------------------------------
@@ -247,65 +290,45 @@ impl TrieList {
     ///   - positive reward  -> move toward front  (lower index = higher priority)
     ///   - negative reward  -> move toward back   (higher index = lower priority)
     ///   - step = `(current_index as f64 * update_rate + 1.0) as usize`
-    ///
-    /// After all moves the trie and index maps are rebuilt.
     pub fn batch_update(&mut self, rewards: &[(&str, f64)], update_rate: f64) {
         for &(token, reward) in rewards {
-            if let Some(&cur) = self.token_to_index.get(token) {
-                let step = (cur as f64 * update_rate + 1.0) as usize;
-                let new_pos = if reward > 0.0 {
-                    cur.saturating_sub(step)
-                } else if reward < 0.0 {
-                    (cur + step).min(self.vocab.len() - 1)
-                } else {
-                    continue;
-                };
-                if new_pos != cur {
-                    let entry = self.vocab.remove(cur);
-                    self.vocab.insert(new_pos, entry);
-                    // Rebuild token_to_index after each move so subsequent
-                    // lookups in the same batch see correct positions.
-                    self.rebuild_indices();
-                }
+            let Some(&h) = self.token_to_handle.get(token) else { continue };
+            let cur = self.pos_of[h.idx()] as usize;
+            let step = (cur as f64 * update_rate + 1.0) as usize;
+            if reward > 0.0 {
+                let new_pos = cur.saturating_sub(step);
+                self.order[new_pos..=cur].rotate_right(1);
+                self.reindex_range(new_pos, cur);
+            } else if reward < 0.0 {
+                let new_pos = (cur + step).min(self.len() - 1);
+                self.order[cur..=new_pos].rotate_left(1);
+                self.reindex_range(cur, new_pos);
             }
         }
-        self.rebuild_trie();
+        self.snapshot_trie_pos();
     }
 
     /// Remove specific tokens from the vocabulary.
     pub fn remove_tokens(&mut self, tokens: &[&str]) {
-        let to_remove: std::collections::HashSet<&str> = tokens.iter().copied().collect();
-        self.vocab.retain(|e| !to_remove.contains(e.token.as_str()));
-        self.rebuild_indices();
-        self.rebuild_trie();
+        let to_remove: HashSet<&str> = tokens.iter().copied().collect();
+        self.remove_where(|t| to_remove.contains(t));
+        self.snapshot_trie_pos();
     }
 
     /// Remove the bottom `memory_out` fraction of the vocab (lowest priority =
     /// highest indices). Returns the list of removed token strings.
     pub fn prune(&mut self, memory_out: f64) -> Vec<String> {
-        let total = self.vocab.len();
+        let total = self.len();
         let remove_count = (total as f64 * memory_out).round() as usize;
         if remove_count == 0 || total == 0 {
             return Vec::new();
         }
-        let keep = total - remove_count;
-        let removed: Vec<String> = self.vocab[keep..]
-            .iter()
-            .map(|e| e.token.clone())
-            .collect();
-        self.vocab.truncate(keep);
-        self.rebuild_indices();
-        self.rebuild_trie();
+        let tail = self.order.split_off(total - remove_count);
+        let removed = tail.into_iter().map(|h| self.forget(h)).collect();
+        self.snapshot_trie_pos();
         removed
     }
 
-    /// Active forgetting via ordinal re-ranking (Yang et al. 2020, §2.3.2).
-    /// Importance is the unit's ordinal position (0 = head). For each evaluated
-    /// chunk `(token, good)`: a *good* chunk moves toward the head,
-    /// `Θ ← ⌊Θ(1−Δ)⌋`, and has any probation cancelled; a *bad* chunk moves
-    /// toward the tail, `Θ ← ⌊Θ(1+Δ)⌋`, and is **deleted if `Θ > |L|`**. Atomic
-    /// units are never deleted (they are moved to the tail instead) so the
-    /// alphabet stays complete. Returns the tokens deleted.
     /// Batched ordinal re-ranking = active forgetting (Yang et al. 2020, §2.3.2;
     /// `structures.py::group_move`). Applied once per document with all rewards.
     /// Reward `e`: `-1` (good) moves the unit headward by `step = ⌊Θ·Δ⌋+1`;
@@ -315,10 +338,11 @@ impl TrieList {
     pub fn group_move(&mut self, rewards: &[(String, i32)], update_rate: f64) -> Vec<String> {
         let mut removed = Vec::new();
         for (w, e) in rewards {
-            let cur = match self.token_to_index.get(w.as_str()) {
-                Some(&i) => i,
+            let h = match self.token_to_handle.get(w.as_str()) {
+                Some(&h) => h,
                 None => continue,
             };
+            let cur = self.pos_of[h.idx()] as usize;
             if cur == 0 {
                 continue;
             }
@@ -327,72 +351,58 @@ impl TrieList {
                 let dest = cur.saturating_sub(step);
                 if dest != cur {
                     // Rotating the span moves only the entries between dest and
-                    // cur; remove + insert would shift the whole tail twice.
-                    self.vocab[dest..=cur].rotate_right(1);
+                    // cur, and only their positions need rewriting.
+                    self.order[dest..=cur].rotate_right(1);
                     self.reindex_range(dest, cur);
                 }
             } else if *e > 0 {
                 let dest = cur + step;
-                if dest >= self.vocab.len() && !Self::is_atomic(w) {
-                    let en = self.vocab.remove(cur); // Θ > |L| -> forget
-                    self.token_to_index.remove(en.token.as_str());
-                    self.reindex_range(cur, self.vocab.len().saturating_sub(1));
-                    removed.push(en.token);
+                if dest >= self.len() && !Self::is_atomic(w) {
+                    self.order.remove(cur); // Θ > |L| -> forget
+                    self.reindex_range(cur, self.len().saturating_sub(1));
+                    removed.push(self.forget(h));
                 } else {
-                    let d = dest.min(self.vocab.len() - 1);
+                    let d = dest.min(self.len() - 1);
                     if d != cur {
-                        self.vocab[cur..=d].rotate_left(1);
+                        self.order[cur..=d].rotate_left(1);
                         self.reindex_range(cur, d);
                     }
                 }
             }
         }
-        // Pure reorders leave the trie's token *set* unchanged; only deletions
-        // require a trie rebuild (ordinal ids otherwise lag until `sync()`).
         if !removed.is_empty() {
-            self.rebuild_trie();
+            self.snapshot_trie_pos();
         }
         removed
     }
 
     /// Batch-remove tokens (passive forgetting's expired probation; the tail
     /// deletion of `structures.py::group_remove`). Atomic units are kept.
-    pub fn group_remove(&mut self, tokens: &std::collections::HashSet<String>) {
+    pub fn group_remove(&mut self, tokens: &HashSet<String>) {
         if tokens.is_empty() {
             return;
         }
-        let before = self.vocab.len();
-        self.vocab
-            .retain(|e| !tokens.contains(&e.token) || Self::is_atomic(&e.token));
-        if self.vocab.len() != before {
-            self.rebuild_indices();
-            self.rebuild_trie();
+        if self.remove_where(|t| tokens.contains(t) && !Self::is_atomic(t)) > 0 {
+            self.snapshot_trie_pos();
         }
     }
 
-    /// Update `token_to_index` for the vocab positions in `[lo, hi]` only —
-    /// the span affected by a single ordinal move — instead of rebuilding the
-    /// whole index. Keeps re-ranking cheap on a large lexicon.
-    fn reindex_range(&mut self, lo: usize, hi: usize) {
-        if self.vocab.is_empty() {
-            return;
-        }
-        let end = hi.min(self.vocab.len() - 1);
-        for i in lo..=end {
-            // Membership is unchanged by a reorder, so the key already exists:
-            // update its index in place, avoiding a String allocation per entry.
-            if let Some(slot) = self.token_to_index.get_mut(self.vocab[i].token.as_str()) {
-                *slot = i;
+    /// Compact the structure: drop forgotten handles and dead trie nodes so
+    /// that handles equal positions again. Call once after training.
+    pub fn sync(&mut self) {
+        let mut entries = std::mem::take(&mut self.entries);
+        let live: Vec<VocabEntry> = self
+            .order
+            .iter()
+            .map(|h| std::mem::replace(&mut entries[h.idx()], VocabEntry { token: String::new(), life: 0, frequency: 0 }))
+            .collect();
+        *self = Self::new();
+        for e in live {
+            self.append(e.token, e.life);
+            if let Some(last) = self.entries.last_mut() {
+                last.frequency = e.frequency;
             }
         }
-    }
-
-    /// Rebuild the reverse index and trie from the current vocab order. Call
-    /// once after training, since `rerank_by_eval` skips trie rebuilds on pure
-    /// reorders to stay fast, leaving the trie's ordinal ids stale.
-    pub fn sync(&mut self) {
-        self.rebuild_indices();
-        self.rebuild_trie();
     }
 
     /// Atomic units form the irreducible alphabet and are never forgotten:
@@ -403,8 +413,69 @@ impl TrieList {
 
     // -- internal helpers ---------------------------------------------------
 
-    /// Insert a single token into the trie (does NOT touch vocab/token_to_index).
-    fn trie_insert(&mut self, token: &str, vocab_id: usize) {
+    /// Rewrite `pos_of` for the positions in `[lo, hi]`, the span affected by
+    /// an ordinal move.
+    fn reindex_range(&mut self, lo: usize, hi: usize) {
+        if self.order.is_empty() {
+            return;
+        }
+        let end = hi.min(self.order.len() - 1);
+        for i in lo..=end {
+            self.pos_of[self.order[i].idx()] = i as u32;
+        }
+    }
+
+    /// STALE_COMPAT bookkeeping: the old implementation rebuilt its trie here,
+    /// refreshing the ids that matches report.
+    fn snapshot_trie_pos(&mut self) {
+        if STALE_COMPAT {
+            self.trie_pos.clone_from(&self.pos_of);
+        }
+    }
+
+    /// Drop every unit for which `drop` holds from the order, then forget it.
+    /// Returns how many units were removed.
+    fn remove_where(&mut self, mut drop: impl FnMut(&str) -> bool) -> usize {
+        let entries = &self.entries;
+        let mut gone = Vec::new();
+        self.order.retain(|&h| {
+            let d = drop(&entries[h.idx()].token);
+            if d {
+                gone.push(h);
+            }
+            !d
+        });
+        let n = gone.len();
+        for h in gone {
+            self.forget(h);
+        }
+        if n > 0 {
+            self.reindex_range(0, self.len());
+        }
+        n
+    }
+
+    /// Forget a unit already taken out of `order`: clear its trie terminal and
+    /// reverse-map entry, mark its handle deleted, and return its token.
+    fn forget(&mut self, h: Handle) -> String {
+        let token = std::mem::take(&mut self.entries[h.idx()].token);
+        let mut node_idx = 0;
+        for ch in token.chars() {
+            match self.nodes[node_idx].children.get(&ch) {
+                Some(&next) => node_idx = next,
+                None => break,
+            }
+        }
+        if self.nodes[node_idx].handle == Some(h) {
+            self.nodes[node_idx].handle = None;
+        }
+        self.token_to_handle.remove(token.as_str());
+        self.pos_of[h.idx()] = DELETED;
+        token
+    }
+
+    /// Insert a single token into the trie (does NOT touch the order or maps).
+    fn trie_insert(&mut self, token: &str, h: Handle) {
         let mut node_idx: usize = 0;
         for ch in token.chars() {
             let next = if let Some(&existing) = self.nodes[node_idx].children.get(&ch) {
@@ -417,26 +488,7 @@ impl TrieList {
             };
             node_idx = next;
         }
-        self.nodes[node_idx].token_index = Some(vocab_id);
-    }
-
-    /// Rebuild `token_to_index` from current `vocab` ordering.
-    fn rebuild_indices(&mut self) {
-        self.token_to_index.clear();
-        for (i, entry) in self.vocab.iter().enumerate() {
-            self.token_to_index.insert(entry.token.clone(), i);
-        }
-    }
-
-    /// Rebuild the entire trie from scratch based on current `vocab`.
-    fn rebuild_trie(&mut self) {
-        self.nodes.clear();
-        self.nodes.push(TrieNode::default()); // root
-        // Collect tokens first to avoid borrow-checker conflict with trie_insert.
-        let tokens: Vec<String> = self.vocab.iter().map(|e| e.token.clone()).collect();
-        for (id, tok) in tokens.iter().enumerate() {
-            self.trie_insert(tok, id);
-        }
+        self.nodes[node_idx].handle = Some(h);
     }
 }
 
