@@ -304,8 +304,9 @@ impl TrieList {
             if *e < 0 {
                 let dest = cur.saturating_sub(step);
                 if dest != cur {
-                    let en = self.vocab.remove(cur);
-                    self.vocab.insert(dest, en);
+                    // Rotating the span moves only the entries between dest and
+                    // cur; remove + insert would shift the whole tail twice.
+                    self.vocab[dest..=cur].rotate_right(1);
                     self.reindex_range(dest, cur);
                 }
             } else if *e > 0 {
@@ -318,8 +319,7 @@ impl TrieList {
                 } else {
                     let d = dest.min(self.vocab.len() - 1);
                     if d != cur {
-                        let en = self.vocab.remove(cur);
-                        self.vocab.insert(d, en);
+                        self.vocab[cur..=d].rotate_left(1);
                         self.reindex_range(cur, d);
                     }
                 }
