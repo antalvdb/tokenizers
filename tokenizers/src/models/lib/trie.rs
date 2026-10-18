@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-// TEMPORARY verification switch: when true, matches report the ordinal a
-// token had at the last full rebuild, reproducing the old trie's stale ids.
+// When true, matches during training report the ordinal a token had at the
+// last full rebuild, as the original trie did between rebuilds. This keeps
+// trained vocabularies identical to those of the 3c201d1c build. Setting it
+// to false reports current ordinals, which changes training output.
 const STALE_COMPAT: bool = true;
 
 /// Position value of a handle whose unit has been forgotten.
