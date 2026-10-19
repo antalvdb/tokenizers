@@ -211,7 +211,9 @@ impl TrieList {
                     node_idx = next;
                     byte_end += ch.len_utf8();
                     char_count += 1;
-                    if ch == ' ' { has_space = true; }
+                    // A leading space marks word-initial position; only an
+                    // internal space makes a unit supra-word.
+                    if ch == ' ' && char_count > 1 { has_space = true; }
                     if let Some(h) = self.nodes[node_idx].handle {
                         if !skip_spaces || !has_space {
                             best = Some((byte_end, h));
@@ -230,7 +232,7 @@ impl TrieList {
     pub fn has_match(&self, input: &str, max_len: usize, skip_spaces: bool) -> bool {
         let mut node_idx: usize = 0;
         for (char_count, ch) in input.chars().enumerate() {
-            if char_count >= max_len || (skip_spaces && ch == ' ') {
+            if char_count >= max_len || (skip_spaces && ch == ' ' && char_count > 0) {
                 return false;
             }
             match self.nodes[node_idx].children.get(&ch) {
@@ -269,7 +271,9 @@ impl TrieList {
                     node_idx = next;
                     byte_end += ch.len_utf8();
                     char_count += 1;
-                    if ch == ' ' { has_space = true; }
+                    // A leading space marks word-initial position; only an
+                    // internal space makes a unit supra-word.
+                    if ch == ' ' && char_count > 1 { has_space = true; }
                     if let Some(h) = self.nodes[node_idx].handle {
                         if !skip_spaces || !has_space {
                             second = best;
@@ -873,6 +877,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_skip_spaces_allows_leading_space() {
+        let mut tl = TrieList::new();
+        for t in [" the", " the cat", "s of", " "] {
+            tl.append(t.to_string(), 1);
+        }
+        // A leading space is word-initial, not supra-word.
+        assert_eq!(tl.match_longest(" the cat", 12, true), Some((" the", 0)));
+        assert_eq!(tl.match_longest(" the cat", 12, false), Some((" the cat", 1)));
+        // An internal space after word-internal characters is supra-word.
+        assert_eq!(tl.match_longest("s of", 12, true), None);
+        let (best, second) = tl.match_two(" the cat", 12, true);
+        assert_eq!(best, Some((" the", 0)));
+        assert_eq!(second, Some((" ", 3)));
+        assert!(tl.has_match(" the", 12, true));
+        assert!(!tl.has_match("s of", 12, true));
     }
 
     // test_match_two_skip_spaces

@@ -53,24 +53,9 @@ impl LiBModel {
             return best;
         }
 
-        // When skip_spaces is set, leading spaces in the remainder are word
-        // boundaries that will be emitted as their own tokens.  Strip them so
-        // the lookahead checks the *next word*, not the space itself (which
-        // match_longest would reject because it contains a space).
-        let lookahead_best = if skip_spaces {
-            remaining_after_best.trim_start_matches(' ')
-        } else {
-            remaining_after_best
-        };
-        let lookahead_second = if skip_spaces {
-            remaining_after_second.trim_start_matches(' ')
-        } else {
-            remaining_after_second
-        };
-
         // Only existence matters here, so stop at the first token found.
-        let has_next_best = self.trie.has_match(lookahead_best, self.max_len, skip_spaces);
-        let has_next_second = self.trie.has_match(lookahead_second, self.max_len, skip_spaces);
+        let has_next_best = self.trie.has_match(remaining_after_best, self.max_len, skip_spaces);
+        let has_next_second = self.trie.has_match(remaining_after_second, self.max_len, skip_spaces);
 
         match (has_next_best, has_next_second) {
             // Both have continuations, or neither does: prefer longest (greedy)
